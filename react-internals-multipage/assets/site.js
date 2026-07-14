@@ -46,7 +46,15 @@ function cssVar(name) { return getComputedStyle(document.body).getPropertyValue(
 function reportEmbedHeight() {
   if (!EMBED_MODE) return;
   const main = document.getElementById('main');
-  const height = Math.ceil(Math.max(main?.scrollHeight || 0, main?.getBoundingClientRect().height || 0) + 28);
+  const section = main?.querySelector('section.topic.active');
+  const height = Math.ceil(Math.max(
+    section?.scrollHeight || 0,
+    section?.getBoundingClientRect().height || 0,
+    main?.scrollHeight || 0,
+    main?.getBoundingClientRect().height || 0,
+    document.body.scrollHeight || 0,
+    document.documentElement.scrollHeight || 0,
+  ) + 28);
   parent.postMessage({ type: 'react-guide:height', chapter: CURRENT_ID, height }, location.origin);
 }
 function applyTheme(light) {

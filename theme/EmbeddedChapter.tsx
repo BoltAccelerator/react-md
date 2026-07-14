@@ -45,9 +45,11 @@ export function EmbeddedChapter({ chapter }: { chapter: string }) {
   }, [chapter, ready]);
 
   useEffect(() => {
-    const frame = iframeRef.current;
     const handleMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin || event.source !== frame?.contentWindow) return;
+      if (
+        event.origin !== window.location.origin ||
+        event.source !== iframeRef.current?.contentWindow
+      ) return;
       if (event.data?.type === 'react-guide:height' && event.data.chapter === chapter) {
         const nextHeight = Math.max(320, Math.min(30000, Number(event.data.height) || 0));
         setHeight(nextHeight);

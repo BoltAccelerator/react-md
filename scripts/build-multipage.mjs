@@ -43,13 +43,13 @@ section.topic { display: block !important; }
 html.is-embed, html.is-embed body { min-height: 0; overflow: hidden; }
 html.is-embed body { display: block; background: transparent; }
 html.is-embed body aside { display: none; }
-html.is-embed body main { width: 100%; max-width: 1000px; margin: 0 auto; padding: 8px 24px 24px; }
+html.is-embed body main { width: 100%; max-width: none; margin: 0; padding: 8px 4px 24px; }
 html.is-embed body section.topic { animation: none; }
 html.is-embed body .navbtns { display: none; }
 html.is-embed body .crumb { margin-top: 0; }
 @media (max-width: 860px) {
   body:not(.embed) aside { position: relative; }
-  html.is-embed body main { padding: 8px 12px 20px; }
+  html.is-embed body main { padding: 8px 4px 20px; }
 }
 `;
 
@@ -113,7 +113,15 @@ function cssVar(name) { return getComputedStyle(document.body).getPropertyValue(
 function reportEmbedHeight() {
   if (!EMBED_MODE) return;
   const main = document.getElementById('main');
-  const height = Math.ceil(Math.max(main?.scrollHeight || 0, main?.getBoundingClientRect().height || 0) + 28);
+  const section = main?.querySelector('section.topic.active');
+  const height = Math.ceil(Math.max(
+    section?.scrollHeight || 0,
+    section?.getBoundingClientRect().height || 0,
+    main?.scrollHeight || 0,
+    main?.getBoundingClientRect().height || 0,
+    document.body.scrollHeight || 0,
+    document.documentElement.scrollHeight || 0,
+  ) + 28);
   parent.postMessage({ type: 'react-guide:height', chapter: CURRENT_ID, height }, location.origin);
 }
 function applyTheme(light) {
