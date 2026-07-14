@@ -16,13 +16,11 @@ const ROUTES: Record<string, string> = {
   main: '06-source-reading/main',
 };
 
-function getBasePath(chapter: string) {
-  const route = ROUTES[chapter];
-  const suffix = `/${route}`;
-  const pathname = window.location.pathname.replace(/\/$/, '');
-  if (pathname.endsWith(suffix)) return pathname.slice(0, -suffix.length) || '';
-  const routeIndex = pathname.split('/').findIndex((part) => /^(?:0[1-6]-)/.test(part));
-  return routeIndex < 0 ? '' : `/${pathname.split('/').filter(Boolean).slice(0, routeIndex).join('/')}`;
+function getBasePath() {
+  const segments = window.location.pathname.split('/').filter(Boolean);
+  const routeIndex = segments.findIndex((part) => /^(?:0[1-6]-)/.test(part));
+  if (routeIndex <= 0) return '';
+  return `/${segments.slice(0, routeIndex).join('/')}`;
 }
 
 function currentTheme() {
@@ -42,7 +40,7 @@ export function EmbeddedChapter({ chapter }: { chapter: string }) {
 
   const src = useMemo(() => {
     if (!ready) return undefined;
-    const base = getBasePath(chapter);
+    const base = getBasePath();
     return `${base}/chapters/${chapter}.html?embed=1&theme=${theme}`;
   }, [chapter, ready]);
 
@@ -55,7 +53,7 @@ export function EmbeddedChapter({ chapter }: { chapter: string }) {
         setHeight(nextHeight);
       }
       if (event.data?.type === 'react-guide:navigate' && ROUTES[event.data.chapter]) {
-        window.location.assign(`${getBasePath(chapter)}/${ROUTES[event.data.chapter]}/`);
+        window.location.assign(`${getBasePath()}/${ROUTES[event.data.chapter]}/`);
       }
     };
     window.addEventListener('message', handleMessage);
