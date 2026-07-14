@@ -114,14 +114,11 @@ function reportEmbedHeight() {
   if (!EMBED_MODE) return;
   const main = document.getElementById('main');
   const section = main?.querySelector('section.topic.active');
-  const height = Math.ceil(Math.max(
-    section?.scrollHeight || 0,
-    section?.getBoundingClientRect().height || 0,
-    main?.scrollHeight || 0,
-    main?.getBoundingClientRect().height || 0,
-    document.body.scrollHeight || 0,
-    document.documentElement.scrollHeight || 0,
-  ) + 28);
+  if (!section) return;
+  const bodyTop = document.body.getBoundingClientRect().top;
+  const sectionBottom = section.getBoundingClientRect().bottom;
+  const mainPaddingBottom = Number.parseFloat(getComputedStyle(main).paddingBottom) || 0;
+  const height = Math.ceil(sectionBottom - bodyTop + mainPaddingBottom + 4);
   parent.postMessage({ type: 'react-guide:height', chapter: CURRENT_ID, height }, location.origin);
 }
 function applyTheme(light) {
