@@ -2509,6 +2509,23 @@ channel.port1.onmessage = performWorkUntilDeadline;
     <p style="margin:8px 0 0">Lane 不只是“高、中、低”标签。它把每个 update 的优先级编码成二进制位，让 React 能在多种更新同时存在时，选择一批工作、跳过暂时不做的更新，并在之后按原顺序补算。</p>
     <p style="margin:6px 0 0"><b>阅读顺序：</b>为什么需要 → Lane/Lanes 是什么 → 如何分配与传播 → root 如何选一批 Lanes → Render 如何处理 → 挂起、唤醒、过期和提交后怎样变化。</p>
   </div>
+  <div class="card">
+    <h3 style="margin-top:0">💡 心智模型：Lane = 用二进制位当「优先级 tag」</h3>
+    <p style="margin:6px 0">在钻进 <code>requestUpdateLane</code>、<code>pendingLanes</code> 这些细节之前，先立一个通用直觉。假设你要设计一个数据结构，同时管理 31 种优先级的更新：合并、判断、取最高。两种做法对比：</p>
+    <table class="simple">
+      <tr><th>方案</th><th>合并</th><th>判断包含</th><th>取最高</th></tr>
+      <tr><td>数组: <code>['sync', 'transition']</code></td><td>push + 去重</td><td>includes(): O(n)</td><td>排序或遍历</td></tr>
+      <tr><td><b>位掩码: <code>0b0101</code></b></td><td><code>|</code> 一条指令</td><td><code>&amp;</code> 一条指令</td><td><code>lanes &amp; -lanes</code> 两条指令</td></tr>
+    </table>
+    <p style="margin:6px 0">Render 阶段要做大量「这个 update 属于本轮吗」的判断，位运算比数组/字符串快几个数量级。<b>这就是 React 用二进制位实现 Lane 的根本原因。</b></p>
+
+    <h3 style="margin:12px 0 4px">前端里的等价类比</h3>
+    <ul class="clean" style="margin:6px 0">
+      <li><b>Linux 权限 <code>rwx</code>：</b>3 个权限各占 1 位，<code>chmod 7</code> 就是 <code>0b111</code> —— 三个权限都开。合并、检查全靠位运算。</li>
+      <li><b>Tailwind class：</b><code>class="bg-red-500 text-white p-4"</code> 每个 class 独立开关，任意组合。你不会为「红底白字」发明新 class。<b>Lane 也是「独立开关的组合」</b>。</li>
+    </ul>
+    <p style="margin:8px 0 0;color:var(--dim);font-size:12.5px">后面看到的 <code>SyncLane = 0b0001</code>、<code>lanes |= Sync</code>、<code>lanes &amp; renderLanes</code> —— 这些都是这个心智模型的应用。</p>
+  </div>
   <h2><span class="dot" style="background:var(--accent)"></span>先回答：React 为什么需要 Lane</h2>
   <p>同一个 root 上可以同时存在不同来源、不同紧急程度的更新。例如用户正在输入文字，页面还要重新筛选一个大列表：</p>
   <div class="phase-strip">
@@ -2539,8 +2556,65 @@ channel.port1.onmessage = performWorkUntilDeadline;
   </table>
   <div class="callout"><b>一次更新链的起点：</b>事件/Transition 上下文 → <code>requestUpdateLane()</code> → <code>update.lane</code> → update 进入 UpdateQueue。Lane 只描述这条更新如何被调度，不改变它在队列中的先后位置。</div>
 
+  <div class="card">
+    <h3 style="margin-top:0">📍 一次 setState 后，Lane 到底存在哪几个地方？</h3>
+    <p style="margin:6px 0">很多人以为 <code>update.lane</code> 就完了。其实一次 setState 会把<b>同一位 lane bit 写到 4 个不同字段</b> —— 每一处解决不同问题。先建立这张全景图，后面的「冒泡」和「bailout」才有依托：</p>
+    <pre>setState(SyncLane) 触发后:
+
+  update.lane        = SyncLane   <span class="cm">← ① 单个 update 的标签</span>
+  Button.lanes       = SyncLane   <span class="cm">← ② 我自己的待办</span>
+  Main.childLanes    = SyncLane   <span class="cm">← ③ 我子树的待办(冒泡)</span>
+  App.childLanes     = SyncLane   <span class="cm">← ③ 我子树的待办(冒泡)</span>
+  root.pendingLanes  = SyncLane   <span class="cm">← ④ 全局待办</span></pre>
+    <p style="margin:6px 0"><b>同一位 bit，4 个视角：</b>「自己」/「我」/「我们家」/「整栋楼」。</p>
+
+    <table class="simple">
+      <tr><th>字段</th><th>回答的问题</th><th>谁用到它</th></tr>
+      <tr><td><code>update.lane</code></td><td>这一个 update 属于哪条 lane？</td><td>Render 处理 UpdateQueue 时用来筛选</td></tr>
+      <tr><td><code>fiber.lanes</code></td><td>这个 fiber 自己有哪些 lane 待处理？</td><td>Render 判断「我这里还有活吗」</td></tr>
+      <tr><td><code>ancestor.childLanes</code></td><td>我的子树里有哪些 lane 待处理？</td><td>Render <b>bailout 整棵子树</b>（性能关键）</td></tr>
+      <tr><td><code>root.pendingLanes</code></td><td>整棵应用还有哪些 lane 待处理？</td><td>Scheduler 决定下一批干哪些活</td></tr>
+    </table>
+
+    <h3 style="margin:12px 0 4px">Trello 类比一秒理解</h3>
+    <pre>Trello Board (Root)
+  └─ Trello List (Fiber)
+       └─ Trello Card (Update)
+            └─ 标签: 「紧急」  <span class="cm">← 这是 update.lane</span></pre>
+    <ul class="clean" style="margin:6px 0">
+      <li><b>Update 上的标签</b>（<code>update.lane</code>）：告诉你这一张卡是什么优先级</li>
+      <li><b>List 头上的汇总</b>（<code>fiber.lanes</code> + <code>childLanes</code>）：这个列有哪些优先级的卡</li>
+      <li><b>Board 头上的汇总</b>（<code>root.pendingLanes</code>）：整个看板有哪些优先级的卡</li>
+    </ul>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">每一层维护自己的「标签汇总」，是为了能在不打开子层的情况下，快速判断「我下面有没有紧急活」 —— 这就是下一节讲的<b>冒泡</b>和 render 阶段的 <b>bailout</b> 依赖的基础。</p>
+  </div>
+
   <h2><span class="dot" style="background:var(--fiber)"></span>第二步：Lane 从更新节点传播到 root</h2>
   <p>只有 Button 知道自己更新还不够，负责调度的是根节点。React 必须沿 Fiber 的 <code>return</code> 指针向父级走，让 root 知道“Button 这条分支有一个 Sync 更新”。源码把这个向上传递过程叫作冒泡。</p>
+
+  <div class="card">
+    <h3 style="margin-top:0">🔢 先看懂 <code>lanes |= Sync</code> 这种写法</h3>
+    <p style="margin:6px 0">下面的图里会频繁看到 <code>|=</code>、<code>&amp;</code> 这种位运算。跟平时写的 <code>+=</code> 是同一种「复合赋值」，只是运算符换成了位运算：</p>
+    <pre>count += 1        <span class="cm">// 等价于 count = count + 1</span>
+lanes |= Sync     <span class="cm">// 等价于 lanes = lanes | Sync</span></pre>
+    <p style="margin:6px 0"><code>|</code> 是<b>按位 OR</b>（<b>不是</b> <code>||</code>！那是逻辑或，完全不同）。一位一位比较，任何一边是 1 结果就是 1：</p>
+    <pre>  0100    <span class="cm">// Button 已经有 Default</span>
+| 0001    <span class="cm">// 又来一个 Sync</span>
+------
+  0101    <span class="cm">// 结果:同时含 Default 和 Sync</span></pre>
+
+    <h3 style="margin:12px 0 4px">用前端熟的 <code>Set</code> 做类比</h3>
+    <p style="margin:6px 0"><code>lanes |= Sync</code> 语义上完全等价于 <code>lanes.add(Sync)</code> —— 往一个位集合里加一个元素，重复加没关系（幂等）。整套对照：</p>
+    <table class="simple">
+      <tr><th>位运算</th><th>Set 等价</th><th>做什么</th></tr>
+      <tr><td><code>a | b</code></td><td><code>new Set([...a, ...b])</code></td><td>并集（返回新值）</td></tr>
+      <tr><td><code>a |= b</code></td><td><code>a.add(b)</code></td><td>把 b 加入 a（就地）</td></tr>
+      <tr><td><code>a &amp; b</code></td><td><code>[...a].filter(x =&gt; b.has(x))</code></td><td>交集</td></tr>
+      <tr><td><code>(a &amp; wanted) !== 0</code></td><td><code>a.has(wanted)</code></td><td>判断包含</td></tr>
+      <tr><td><code>a &amp; ~b</code></td><td><code>a.delete(b)</code></td><td>从 a 里移除 b</td></tr>
+    </table>
+    <div class="callout warn" style="margin-top:10px"><b>为什么用 <code>|=</code> 不用 <code>=</code>？</b>Button.lanes 之前可能已经有别的 lane。<code>Button.lanes = SyncLane</code> 会把原有的全冲掉；<code>Button.lanes |= SyncLane</code> 才是「加进去」。<b>这跟 <code>list.push(x)</code> vs <code>list = [x]</code> 是同一个道理。</b></div>
+  </div>
 
   <div class="card">
     <b>Button 产生 Sync 更新后，各层分别记录什么</b>
@@ -2567,6 +2641,96 @@ channel.port1.onmessage = performWorkUntilDeadline;
     <tr><td><code>expiredLanes</code></td><td>等待太久、需要防止继续饿死的 Lane</td><td>超过过期时间后标记，后续提高完成紧迫性</td></tr>
     <tr><td><code>entangledLanes</code></td><td>与其他 Lane 有共同完成关系的 Lane</td><td>相关更新不应独立提交中间状态时建立关联</td></tr>
   </table>
+  <div class="card">
+    <h3 style="margin-top:0">🎯 关键理解：xxxLanes 不是不同的队列</h3>
+    <p style="margin:6px 0">上面这几个字段容易让人误以为 root 上挂了 5 个平行的队列。<b>不是的</b> —— 它们都是<b>位掩码</b>（都是数字），代表<b>从不同视角看同一批位</b>。就像你 Trello 里的一张卡可以同时被打上「pending + expired」两个标签。</p>
+    <pre>pendingLanes    = 0b1111   <span class="cm">// 有 4 种 lane 等待</span>
+suspendedLanes  = 0b0010   <span class="cm">// 其中第 1 位挂起了(等数据)</span>
+pingedLanes     = 0b0010   <span class="cm">// 同一位数据 ready 了,可以重试</span>
+expiredLanes    = 0b0001   <span class="cm">// 第 0 位等太久要保底</span></pre>
+    <p style="margin:6px 0">「真正新鲜可干的 lane」就是这几个掩码之间的<b>位运算组合</b>：</p>
+    <pre><span class="kw">const</span> unblockedLanes = pendingLanes &amp; ~suspendedLanes;   <span class="cm">// 排掉挂起的</span>
+<span class="kw">const</span> nextLanes     = unblockedLanes | pingedLanes;      <span class="cm">// 加回可重试的</span></pre>
+    <p style="margin:8px 0 0;color:var(--dim);font-size:12.5px">这也是为什么 <code>getNextLanes</code> 能在几条位运算里就把复杂的调度状态收敛出来 —— 每一步都是<b>集合运算</b>。</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">🎬 用一个 Suspense 时间线走完 5 个字段</h3>
+    <p style="margin:6px 0">上面 5 个字段抽象讲很难懂。用一个真实场景走一遍就清晰。想象你在做 tab 切换，配了 Suspense：</p>
+    <pre>&lt;button onClick={() =&gt; setTab('profile')}&gt;Profile&lt;/button&gt;
+&lt;Suspense fallback={&lt;Skeleton/&gt;}&gt;
+  {tab === 'profile' &amp;&amp; &lt;UserProfile /&gt;}
+&lt;/Suspense&gt;
+
+<span class="kw">function</span> <span class="fn">UserProfile</span>(){
+  <span class="kw">const</span> user = <span class="fn">use</span>(<span class="fn">fetchUser</span>());   <span class="cm">// ★数据未就绪时会 throw Promise</span>
+  <span class="kw">return</span> &lt;div&gt;{user.name}&lt;/div&gt;;
+}</pre>
+
+    <p style="margin:14px 0 4px"><b>t=0 · 用户点击 button</b></p>
+    <pre><span class="fn">setTab</span>(<span class="st">'profile'</span>) → 产生 update, lane = SyncLane
+
+pendingLanes    = 0b0001   <span class="cm">← 「待办清单里加了一件事」</span>
+suspendedLanes  = 0b0000
+pingedLanes     = 0b0000</pre>
+
+    <p style="margin:14px 0 4px"><b>t=1 · Render 到 UserProfile，数据还没就绪</b></p>
+    <p style="margin:6px 0"><code>use()</code> 抛出 Promise，Render 中断：</p>
+    <pre>pendingLanes    = 0b0001   <span class="cm">← 事还在待办里</span>
+suspendedLanes  = 0b0001   <span class="cm">← ★被打上「卡住,等 fetchUser」标签</span>
+pingedLanes     = 0b0000</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">此时不能提交（界面坏的），显示 <code>&lt;Skeleton/&gt;</code>。SyncLane 从 pendingLanes 里<b>没被清掉</b> —— 事没干完。</p>
+
+    <p style="margin:14px 0 4px"><b>t=2 · Promise resolve，ping 信号到达</b></p>
+    <pre>pendingLanes    = 0b0001
+suspendedLanes  = 0b0001   <span class="cm">← 还标着「卡住」</span>
+pingedLanes     = 0b0001   <span class="cm">← ★同一位被标为「外部好了,能重试」</span></pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">同一位 SyncLane 现在<b>同时挂着 3 个标签</b>：pending + suspended + pinged。这就是「多视角看同一批位」的意思。</p>
+
+    <p style="margin:14px 0 4px"><b>t=3 · 重新调度，Render 成功，Commit</b></p>
+    <p style="margin:6px 0"><code>getNextLanes</code> 通过位运算算出这次能跑什么：</p>
+    <pre><span class="kw">const</span> canRun = (pendingLanes &amp; ~suspendedLanes) | pingedLanes;
+<span class="cm">//        = (0b0001 &amp; 0b1110) | 0b0001</span>
+<span class="cm">//        = 0b0000 | 0b0001</span>
+<span class="cm">//        = 0b0001   ← SyncLane 又能跑了</span></pre>
+    <p style="margin:6px 0">这次 <code>use()</code> 拿到真数据 → commit，清除标签：</p>
+    <pre>pendingLanes    = 0b0000   <span class="cm">← 干完了,全清</span>
+suspendedLanes  = 0b0000
+pingedLanes     = 0b0000</pre>
+
+    <h3 style="margin:14px 0 4px">再看 <code>expiredLanes</code>：防止低优被饿死</h3>
+    <p style="margin:6px 0">你用 <code>startTransition</code> 更新大列表，用户不断打字触发高优 Sync，Transition 一直被抢占：</p>
+    <pre>t=0    startTransition(() =&gt; setBigList) → pendingLanes |= TransitionLane
+t=0.5  用户打字,Sync 抢占,Transition 被丢弃重来
+t=1    用户又打字...
+...
+t=5    5 秒过去了,Transition 一次都没渲完
+
+React 察觉:太久了,再拖就饿死
+  expiredLanes |= TransitionLane   <span class="cm">← ★「别再让它饿死!」</span></pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">下一轮 Scheduler 看到 expired，<b>强制同步做完这个 lane</b>（不再允许被抢占）。这是<b>兜底机制</b>，保证低优最终一定会执行。</p>
+
+    <h3 style="margin:14px 0 4px">再看 <code>entangledLanes</code>：必须一起处理</h3>
+    <p style="margin:6px 0">最典型场景：<code>useSyncExternalStore</code> 保证不同组件读同一外部 store 时不撕裂，或同一 state 上 Sync + Transition 两次 setState 有依赖关系。React 用 entangle 说：<b>这几条 lane 缠在一起，处理其中一条时必须把其它也一起处理</b>，避免中间状态出错。</p>
+    <pre>root.entangledLanes = Sync | Transition   <span class="cm">← 这两位缠住</span>
+
+<span class="cm">// getNextLanes 内部逻辑:</span>
+<span class="kw">if</span>(selected &amp; entangledLanes){
+  selected |= entangledLanes   <span class="cm">// 强制把关联的都拉进本轮</span>
+}</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>普通开发者接触这个字段不多</b>，通常由 React 内部或状态库使用。理解「必须绑在一起」就够了。</p>
+
+    <h3 style="margin:14px 0 4px">字段生命周期速查</h3>
+    <table class="simple">
+      <tr><th>字段</th><th>什么时候被打上</th><th>什么时候被清除</th></tr>
+      <tr><td><code>pendingLanes</code></td><td>新 setState 到达 root</td><td>该 lane commit 成功后</td></tr>
+      <tr><td><code>suspendedLanes</code></td><td>Render 中遇到 <code>throw promise</code></td><td>commit 成功后；或 pinged 时「覆盖」</td></tr>
+      <tr><td><code>pingedLanes</code></td><td>Promise resolve 触发 ping</td><td>下轮 render 后清</td></tr>
+      <tr><td><code>expiredLanes</code></td><td>某 lane 停留超过阈值</td><td>commit 后清</td></tr>
+      <tr><td><code>entangledLanes</code></td><td>特殊 API 触发（如 <code>useSyncExternalStore</code>）</td><td>commit 后清</td></tr>
+    </table>
+    <div class="callout good" style="margin-top:8px"><b>本节小结：</b>5 个字段都是「给同一批 lane 打不同状态标签」—— pending 没干完 / suspended 等外部 / pinged 外部好了 / expired 拖太久 / entangled 绑一起做。<code>getNextLanes</code> 用几句位运算把这些标签综合起来，选出「这一轮该做哪些」。</div>
+  </div>
 
   <h2><span class="dot" style="background:var(--recon)"></span>第三步：getNextLanes 选择下一批工作</h2>
   <p><code>getNextLanes(root)</code> 的目标不是“永远取最高的一个 bit”，而是从 root 的各种 Lane 状态中选出<b>下一批值得执行、能够执行，并且适合一起执行的工作</b>。可以按下面的顺序理解：</p>
@@ -2634,6 +2798,23 @@ channel.port1.onmessage = performWorkUntilDeadline;
   <p>React 把更低的二进制位定义为更高优先级，因此 <code>getHighestPriorityLane(1001)</code> 会取出最右侧的 <code>1</code>，得到 <code>0001</code>，也就是 Sync。源码常见写法是 <code>lanes &amp; -lanes</code>；现阶段只需记住它的结果是“保留最右侧的 1”。</p>
   <pre><span class="kw">const</span> nextLane = pendingLanes &amp; -pendingLanes;
 <span class="cm">// pendingLanes = 1001 → nextLane = 0001 → SyncLane</span></pre>
+  <div class="card">
+    <h3 style="margin-top:0">🔍 拆解 <code>lanes &amp; -lanes</code>：为什么它就是「取最高优先级」</h3>
+    <p style="margin:6px 0">这个技巧看起来神秘，其实靠的是<b>补码性质</b>。以 <code>lanes = 0b1010</code>（十进制 10）为例：</p>
+    <pre><span class="cm">// -lanes 的算法:按位取反,再 + 1(二进制补码定义)</span>
+lanes  = 0b0000...1010
+~lanes = 0b1111...0101
++1     = 0b1111...0110    <span class="cm">// 这就是 -lanes</span>
+
+<span class="cm">// 现在做 lanes &amp; -lanes:</span>
+   0b0000...1010
+&amp; 0b1111...0110
+   -------------
+   0b0000...0010    <span class="cm">// 只保留了最右侧的那位 1</span></pre>
+    <p style="margin:6px 0"><b>数学性质：</b>一个数和它的相反数按位 AND，永远只留最右侧那位 1（也叫 lowest set bit）。</p>
+    <p style="margin:6px 0"><b>所以 React 选择「低位 = 高优先级」</b> —— 是为了让这个位技巧直接等于「取最高优先级」。设计上一环扣一环。</p>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">如果反过来定义「高位 = 高优先级」，取最高就得循环找最左边的 1，代码更慢也更长。</p>
+  </div>
   <div class="callout good"><b>三个运算对应三个问题：</b><code>|</code> 把 Lane 加入集合；<code>&amp;</code> 判断集合是否包含某 Lane；<code>lanes &amp; -lanes</code> 取出最高优先级 Lane。真实源码位数更多，但读法完全相同。</div>
 
   <div class="card">
