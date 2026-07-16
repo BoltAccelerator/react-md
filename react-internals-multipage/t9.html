@@ -109,13 +109,98 @@
       <p>Hook 没有 <code>firstBaseUpdate/lastBaseUpdate</code>；它用一个 <code>baseQueue</code> 尾指针表示基础环状队列，队头同样是 <code>baseQueue.next</code>。</p>
     </div>
   </div>
-  <div class="callout"><b>为什么类组件要同时保存 first 和 last？</b>处理队列时要从 first 开始向后遍历；合并新 update 时又要快速找到 last 追加。只有 first，追加时需要遍历整条链表；同时保存 last，追加就是 O(1)。</div>
+  <div class="card">
+    <h3 style="margin-top:0">💡 为什么要同时保存 <code>first</code> 和 <code>last</code>？（链表基础）</h3>
+    <p style="margin:6px 0"><code>updateQueue</code> 是一条<b>单向链表</b>而不是数组。节点长这样：<code>{ action, next }</code>，节点之间靠 <code>next</code> 串起来 —— 你手上拿到哪个节点，就只能从它往后走，回不了头。</p>
+    <div style="font-family:var(--mono);font-size:12.5px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin:8px 0;text-align:center">[u1] → [u2] → [u3] → null</div>
+    <p style="margin:6px 0"><b>类比 DOM：</b>浏览器里 <code>parent.firstChild</code> 用来从头遍历子节点，<code>parent.lastChild</code> 用来 O(1) 找末尾；<code>appendChild</code> 是 O(1) 的原因，就是浏览器同时保存了 <code>lastChild</code>。React 的 <code>firstBaseUpdate</code> / <code>lastBaseUpdate</code> 是同一个思路。</p>
+    <table class="simple">
+      <tr><th>操作</th><th>只有 <code>first</code></th><th><code>first</code> + <code>last</code></th></tr>
+      <tr><td>处理队列（从头往后 reduce）</td><td>O(n) ✅</td><td>O(n) ✅</td></tr>
+      <tr><td><b>追加新 update</b></td><td><b>O(n)</b>——必须一路 <code>node.next</code> 走到末尾</td><td><b>O(1)</b>——<code>last.next = new; last = new;</code></td></tr>
+      <tr><td>额外内存</td><td>1 个指针</td><td>2 个指针</td></tr>
+    </table>
+    <p style="margin:8px 0 0;color:var(--dim);font-size:12.5px">多存一个尾指针的代价，换掉每次追加时对整条队列的遍历 —— 这是所有链表设计追加操作时的通用做法，不是 React 特有的。</p>
+  </div>
 
   <h2><span class="dot" style="background:var(--accent)"></span>② 新 update 先进入 pending 环状链表</h2>
   <p>下面先看类组件的 <code>shared.pending</code>；Hook 的 <code>queue.pending</code> 插入方式相同。多次更新形成环状链表，<code>pending</code> 指向最后一个节点，<code>pending.next</code> 指向第一个节点。</p>
+  <div class="card">
+    <h3 style="margin-top:0">💡 一步步理解「环状链表 + 一个 pending 指针」</h3>
+    <p style="margin:6px 0"><b>先回想上一节：</b>普通单链表要 O(1) 追加，得同时存 <code>first</code> 和 <code>last</code> 两个指针。React 想再省一步 —— <b>用一个指针同时表达头和尾</b>。</p>
+    <p style="margin:6px 0"><b>关键魔法：</b>把链表的尾巴接回头，变成<b>环</b>：</p>
+    <pre style="margin:8px 0">从这样：  [u1] → [u2] → [u3] → null
+
+变成这样：  [u1] → [u2] → [u3]
+             ↑              │
+             └──────────────┘
+                 u3.next = u1</pre>
+    <p style="margin:6px 0">环成了以后，一个指针 <code>pending</code> 指着尾巴 u3 就够了：</p>
+    <pre style="margin:8px 0">pending          → u3   <span class="cm">// 这是尾</span>
+pending.next     → u1   <span class="cm">// 顺着尾的 next 就到头</span></pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">很多人下意识觉得 <code>pending</code> 应该指第一个节点 —— 反了。它指最后一个，因为「尾 + 环」等价于「头 + 尾」两个信息。</p>
+
+    <h3 style="margin-top:16px">插入过程分步演示</h3>
+    <p style="margin:6px 0">代码就三行（简化）：</p>
+    <pre><span class="kw">function</span> <span class="fn">enqueueUpdate</span>(queue, update){
+  <span class="kw">const</span> pending = queue.pending;
+  <span class="kw">if</span>(pending === <span class="kw">null</span>){
+    update.next = update;              <span class="cm">// 第一个,自己指自己</span>
+  } <span class="kw">else</span> {
+    update.next = pending.next;        <span class="cm">// 新节点.next = 旧的头</span>
+    pending.next = update;             <span class="cm">// 旧的尾.next = 新节点</span>
+  }
+  queue.pending = update;              <span class="cm">// pending 前移到新的尾</span>
+}</pre>
+    <ol style="padding-left:22px;color:var(--txt2);font-size:14px;line-height:1.95;margin:8px 0 0">
+      <li><b>第 1 次插入 u1（空环）：</b><code>u1.next = u1</code>，pending → u1。一个人的环，自己指自己。</li>
+      <li><b>第 2 次插入 u2：</b>三步指针 —— ① <code>u2.next = u1</code>（新节点指向旧的头）② <code>u1.next = u2</code>（旧的尾指向新节点）③ pending 前移到 u2。此时 <code>pending = u2</code>（尾）、<code>pending.next = u1</code>（头）。</li>
+      <li><b>第 3 次插入 u3：</b>同样三步，结果 <code>pending = u3</code>、<code>pending.next = u1</code>，环变成 <code>u1 → u2 → u3 → u1 → ...</code></li>
+    </ol>
+    <p style="margin:8px 0 0;color:var(--dim);font-size:12.5px"><b>关键观察：</b>不管链表已经多长，每次插入永远只改 3 个指针 —— <b>O(1)</b>。</p>
+
+    <h3 style="margin-top:16px">和上一节的方案摆一起对比</h3>
+    <table class="simple">
+      <tr><th>方案</th><th>找头</th><th>找尾</th><th>追加</th><th>需要几个指针</th></tr>
+      <tr><td>普通链表，只有 <code>first</code></td><td><code>first</code></td><td>从头遍历</td><td>O(n) ❌</td><td>1</td></tr>
+      <tr><td>普通链表，<code>first</code> + <code>last</code></td><td><code>first</code></td><td><code>last</code></td><td>O(1) ✅</td><td>2</td></tr>
+      <tr><td><b>环状链表，只存 <code>pending</code>（=尾）</b></td><td><code>pending.next</code></td><td><code>pending</code></td><td><b>O(1) ✅</b></td><td><b>1</b></td></tr>
+    </table>
+    <p style="margin:8px 0 0;color:var(--dim);font-size:12.5px">环状链表把普通的双指针方案压缩成一个指针 —— 用「绕一圈能回到头」的性质，从「存两个位置」降级为「存一个位置」。</p>
+  </div>
   <div class="callout warn"><b>先把范围说准确：</b>“pending 环转成普通链表”特指<b>类组件与 HostRoot</b>。Hook 的 <code>queue.pending</code> 也是环，但它会与同为环状的 <code>baseQueue</code> 合并，处理时仍可用“记住队头，绕一圈回到队头即结束”的方式遍历。</div>
   <h3>为什么同一批 update 要切换两种形态</h3>
   <p>因为这批 update 在进入 Render 前后承担的是两种完全不同的任务。可以把 <code>pending</code> 看成<b>收件箱</b>，把基础队列看成 Render 的<b>工作清单</b>：</p>
+  <div class="card">
+    <h3 style="margin-top:0">🚚 用「搬家」类比想通</h3>
+    <p style="margin:6px 0"><b>在旧房子（收集阶段）：</b>东西不断打包成箱子往门口堆。你不需要「从第几箱开始拆」，也不关心「最后一箱是啥」，<b>只关心「最新一箱放哪最方便下一箱堆」</b> —— 这就是环状链表用一个 <code>pending</code> 尾指针的语义。</p>
+    <p style="margin:6px 0"><b>到新房子（处理阶段）：</b>搬家公司把所有箱子按顺序摆好，你从第一箱开始拆，拆一箱丢一箱，拆到没箱子就完事 —— 这就是普通链表 <code>while(node !== null)</code> 的语义。</p>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">在旧房子里想着「怎么拆」很傻（可能还要再打包），在新房子里想着「下一箱塞哪」也很傻（已经全摆好了）。<b>中间那一次「断环」就是搬家公司帮你从旧房搬到新房的动作</b> —— 也就是稍后会讲的那 4 步指针操作。</p>
+
+    <h3 style="margin-top:14px">读写分离视角</h3>
+    <p style="margin:6px 0">如果你写过数据库、消息队列或事件循环，这个模式很熟：</p>
+    <pre style="margin:8px 0">setState（写）        Render（读）
+    │                      │
+    ▼                      ▼
+[环状 pending]  ──断环──►  [普通 baseQueue]
+                   (Render 开始时)</pre>
+    <ul class="clean" style="margin:6px 0">
+      <li><b>写侧</b>：可能 1 次也可能 100 次，只要塞得进去 → 用环（一个指针搞定）</li>
+      <li><b>读侧</b>：一次性遍历、要能跳过低优 update 存 baseQueue → 用普通链表</li>
+      <li><b>断环</b>：Render 开始时把写侧攒的一批数据整体交接给读侧</li>
+    </ul>
+
+    <h3 style="margin-top:14px">为什么不用一种结构撑到底</h3>
+    <p style="margin:6px 0">假设 Render 阶段还继续用环状链表遍历：</p>
+    <pre><span class="kw">let</span> node = pending.next;   <span class="cm">// 从头开始</span>
+<span class="kw">const</span> start = node;         <span class="cm">// ★还得记住起点做哨兵</span>
+<span class="kw">do</span> {
+  <span class="fn">reduce</span>(node);
+  node = node.next;
+} <span class="kw">while</span>(node !== start);    <span class="cm">// 环上永远绕圈,得靠哨兵才停</span></pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">遍历要多传一个「起点哨兵」，代码就复杂了；处理途中要跳过 update、重新拼一条 baseQueue，在环上改指针也更别扭。<b>用 null 结尾的普通链表，<code>while(node !== null)</code> 一行就完事</b> —— 这是所有前端都写熟的模式。</p>
+    <p style="margin:8px 0 0;color:var(--dim);font-size:12.5px"><b>反过来</b>，如果收集也用普通链表，就变回上一节的问题：要么追加 O(n)、要么就得存 first+last 两个指针，比环更费。<b>没有一种数据结构能同时把两种需求做到最优</b>，所以 React 选择「收用环、读用链表」，中间做一次切换。</p>
+  </div>
   <table class="simple">
     <tr><th>所处阶段</th><th>主要操作</th><th>适合的形态</th><th>为什么</th></tr>
     <tr><td><b>事件发生时：收集</b></td><td>不断把新 update 追加到末尾</td><td>尾指针表示的环</td><td>只存 <code>pending</code> 一个指针，就能用 <code>pending</code> 找队尾、用 <code>pending.next</code> 找队头；每次追加都是 O(1)。此时不需要遍历或计算 state。</td></tr>
@@ -129,6 +214,125 @@
       <li><b>断开队尾到队头的回边：</b><code>last.next = null</code>，于是 <code>u1 → u2 → u3 → u1</code> 变为 <code>u1 → u2 → u3 → null</code>。</li>
       <li><b>接入工作清单：</b>把 <code>first/last</code> 追加到类组件基础队列的 <code>firstBaseUpdate/lastBaseUpdate</code> 后面。</li>
     </ol>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">🎬 一步步看指针怎么变</h3>
+    <p style="margin:6px 0"><b>起点：</b>已经攒了三个 update 在 pending 环里，fiber 上还挂着一条<b>已有的 baseQueue</b>（比如上一轮跳过的低优 update <code>b1 → b2</code>）。</p>
+    <pre>shared.pending  ─→ u3
+                    │
+   ┌────────────────┘
+   ▼
+  [u1] → [u2] → [u3]
+   ↑              │
+   └──────────────┘   ← u3.next = u1（环）
+
+firstBaseUpdate ─→ [b1] → [b2] → null
+lastBaseUpdate  ─→ [b2]</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>目标：</b>把环上的 <code>u1 → u2 → u3</code> 接到 baseQueue 末尾，变成 <code>b1 → b2 → u1 → u2 → u3 → null</code>。</p>
+
+    <p style="margin:14px 0 4px"><b>① <code>last = shared.pending</code></b> —— 拿临时变量记住尾巴 u3。<b>没改任何指针</b>。</p>
+    <pre>last ─→ u3   （新变量，指向 u3）
+环状结构不变</pre>
+
+    <p style="margin:14px 0 4px"><b>② <code>first = last.next</code></b> —— 通过 <code>last.next</code> 得到头（因为环上 <code>u3.next = u1</code>）。<b>还是没动指针，只是记录。</b></p>
+    <pre>last  ─→ u3
+first ─→ u1   （通过 last.next 得到）</pre>
+    <p style="margin:4px 0;color:var(--warn);font-size:12.5px">⚠️ <b>这一步为什么不能省？</b>下一步就要断环了。断环后 u3 → u1 那条边没了，如果没提前把 u1 记下来，<b>永远找不到 u1</b> —— u1/u2 会一起丢失。</p>
+
+    <p style="margin:14px 0 4px"><b>③ <code>last.next = null</code></b> —— 真正的「断环」。把 u3 原本指向 u1 的那条回边切了。</p>
+    <pre>[u1] → [u2] → [u3] → null    ← 已经是普通链表了!
+
+last  ─→ u3
+first ─→ u1</pre>
+
+    <p style="margin:14px 0 4px"><b>④ 挂到 baseQueue 末尾</b></p>
+    <pre><span class="kw">if</span>(lastBaseUpdate === <span class="kw">null</span>){
+  firstBaseUpdate = first;         <span class="cm">// baseQueue 空,直接接头</span>
+} <span class="kw">else</span> {
+  lastBaseUpdate.next = first;     <span class="cm">// b2.next = u1</span>
+}
+lastBaseUpdate = last;             <span class="cm">// 尾巴前移到 u3</span></pre>
+    <p style="margin:4px 0"><b>结果：</b></p>
+    <pre>firstBaseUpdate ─→ [b1] → [b2] → [u1] → [u2] → [u3] → null
+lastBaseUpdate  ─→ [u3]</pre>
+
+    <h3 style="margin-top:16px">整合成一段可执行代码</h3>
+    <pre><span class="kw">if</span>(shared.pending !== <span class="kw">null</span>){
+  <span class="kw">const</span> last  = shared.pending;    <span class="cm">// ① 记尾</span>
+  <span class="kw">const</span> first = last.next;         <span class="cm">// ② 记头(必须在断环前)</span>
+  last.next = <span class="kw">null</span>;                <span class="cm">// ③ 断环</span>
+  shared.pending = <span class="kw">null</span>;           <span class="cm">// 清空收件箱</span>
+
+  <span class="cm">// ④ 挂到 baseQueue 末尾</span>
+  <span class="kw">if</span>(lastBaseUpdate === <span class="kw">null</span>) firstBaseUpdate = first;
+  <span class="kw">else</span> lastBaseUpdate.next = first;
+  lastBaseUpdate = last;
+}</pre>
+    <p style="margin:8px 0 0;color:var(--dim);font-size:12.5px"><b>1-3 步 = 断环</b>（从环形变直链）；<b>第 4 步 = 接入</b>（拼到工作清单后面）。做完之后 Render 就能用 <code>while(node !== null)</code> 从头 reduce 到尾。</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">📌 展开讲第 ④ 步：「接入工作清单」到底做什么</h3>
+
+    <h3 style="margin:8px 0 4px">先分清「字段」和「队列」</h3>
+    <p style="margin:6px 0"><code>firstBaseUpdate</code> / <code>lastBaseUpdate</code> 是 <code>fiber.updateQueue</code> 上的<b>两个字段</b>，值是"指向 update 节点的引用"。整条"基础队列"是从 <code>firstBaseUpdate</code> 顺着 <code>.next</code> 走到 <code>null</code> 得到的<b>逻辑链</b>，本身不是独立对象。</p>
+    <table class="simple">
+      <tr><th>名字</th><th>是什么</th><th>类比</th></tr>
+      <tr><td><code>firstBaseUpdate</code></td><td>字段，值是"第一个 update 节点"</td><td>DOM 的 <code>parent.firstChild</code></td></tr>
+      <tr><td><code>lastBaseUpdate</code></td><td>字段，值是"最后一个 update 节点"</td><td>DOM 的 <code>parent.lastChild</code></td></tr>
+      <tr><td>基础队列 / baseQueue / 工作清单</td><td>逻辑概念，一整条链</td><td>DOM 的 <code>parent.children</code></td></tr>
+    </table>
+    <pre>firstBaseUpdate ────┐
+                    ▼
+                   [b1] ───► [b2] ───► null
+                              ▲
+lastBaseUpdate  ──────────────┘</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">两个字段是「入口」和「出口」的书签，节点之间靠自己的 <code>next</code> 连接。</p>
+
+    <h3 style="margin:14px 0 4px">为什么「工作清单」可能已经有东西</h3>
+    <p style="margin:6px 0">baseQueue 是<b>跟着 fiber 走、跨渲染持久化的</b>。<b>上一轮渲染跳过没处理的低优 update</b> 会留在这里，等下一轮再算。举例：</p>
+    <pre>第 1 轮渲染前 pending 里有:
+  [高优 u1] → [低优 u2] → [高优 u3]   (环)
+
+第 1 轮只算高优 → 处理完 u1、u3
+低优 u2 不能丢!存进 baseQueue:
+  firstBaseUpdate ─→ [u2]
+  lastBaseUpdate  ─→ [u2]
+
+进入第 2 轮时,baseQueue 里已经有 u2 —— 它是上一轮的「剩饭」。</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">所以第 ④ 步<b>必须是「追加」</b>，不是「替换」：新 setState 排在老剩饭后面，才能保证 update 处理顺序 = setState 调用顺序。</p>
+
+    <h3 style="margin:14px 0 4px">两种情况的具体动作</h3>
+    <p style="margin:6px 0"><b>情况 A · baseQueue 是空的</b>（首次渲染，或上轮全处理完）：</p>
+    <pre>接入前:
+  firstBaseUpdate = <span class="kw">null</span>
+  lastBaseUpdate  = <span class="kw">null</span>
+  新断出来的:  [u1] → [u2] → [u3] → <span class="kw">null</span>
+
+代码: firstBaseUpdate = first;   <span class="cm">// 头书签贴上 u1</span>
+      lastBaseUpdate  = last;    <span class="cm">// 尾书签贴上 u3</span>
+
+接入后:
+  firstBaseUpdate ────┐
+                     ▼
+                    [u1] → [u2] → [u3] → <span class="kw">null</span>
+                                    ▲
+  lastBaseUpdate  ──────────────────┘</pre>
+
+    <p style="margin:6px 0"><b>情况 B · baseQueue 有内容</b>（上轮跳过了 b1、b2）：</p>
+    <pre>接入前:
+  firstBaseUpdate ─→ [b1] → [b2] → <span class="kw">null</span>
+  lastBaseUpdate  ─→ [b2]
+  新断出来的:  [u1] → [u2] → [u3] → <span class="kw">null</span>
+
+代码: lastBaseUpdate.next = first;   <span class="cm">// ★真正改链:b2.next 从 null 变为 u1</span>
+      lastBaseUpdate      = last;    <span class="cm">// 尾书签从 b2 移到 u3</span>
+
+接入后:
+  firstBaseUpdate ─→ [b1] → [b2] → [u1] → [u2] → [u3] → <span class="kw">null</span>
+                                                   ▲
+  lastBaseUpdate  ─────────────────────────────────┘</pre>
+
+    <div class="callout good" style="margin-top:10px"><b>关键观察：</b>三条赋值语句里，<b>只有 <code>lastBaseUpdate.next = first</code> 真的在改链表结构</b> —— 把 b2 原本的 <code>.next = null</code> 改成 <code>.next = u1</code>。另外两条（<code>firstBaseUpdate = first</code> 和 <code>lastBaseUpdate = last</code>）只是移动"书签"字段，链上节点本身没变。</div>
   </div>
   <div class="callout good"><b>为什么一定要先读 <code>last.next</code> 再断环？</b>因为外部只保存了队尾 <code>last</code>，队头藏在 <code>last.next</code> 中。如果先执行 <code>last.next = null</code>，就会丢失队头入口，无法找到 u1。正确顺序是“先取队头，再断开回边”。</div>
   <p>所以，环并不是“计算 update 更方便”，普通链表也不是“入队更快”。React 是在每个阶段选择更适合当下操作的表示：<b>环负责高频收集和整批移交，普通链表负责有明确终点的顺序计算。</b></p>
