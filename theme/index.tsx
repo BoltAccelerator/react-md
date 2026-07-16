@@ -5,10 +5,6 @@ import './tutorial-system.css';
 
 const LOCKED_ROUTE_PREFIXES = [
   'legacy',
-  '03-concurrent',
-  '04-advanced',
-  '05-core-topics',
-  '06-source-reading',
 ];
 
 const GROUP_LABELS: Record<string, string> = {
