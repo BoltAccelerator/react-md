@@ -15,5 +15,8 @@
   },
   "devDependencies": {
     "@rspress/core": "latest"
+  },
+  "volta": {
+    "node": "24.13.0"
   }
 }
