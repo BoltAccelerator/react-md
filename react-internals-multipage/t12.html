@@ -115,6 +115,71 @@ task = {
   startTime,
   expirationTime
 };</pre>
+  <div class="card">
+    <h3 style="margin-top:0">📖 逐块拆解上面这段代码</h3>
+    <p style="margin:6px 0">上面代码涉及 6 个东西，一个个认识：</p>
+
+    <h4 style="margin:12px 0 4px">① <code>performConcurrentWorkOnRoot(root, didTimeout)</code> —— React 的「干活总入口」</h4>
+    <p style="margin:6px 0">React 里干实事的那个函数。一被调用就开始处理这个 root（走完 render → commit）。<b>类比：</b>像 Redux 的 <code>store.dispatch</code>，一调用触发一整套流程。</p>
+    <p style="margin:6px 0">它需要 2 个参数：<code>root</code>（要处理哪棵树）和 <code>didTimeout</code>（是不是超时要强制同步做完）。</p>
+
+    <h4 style="margin:12px 0 4px">② <code>.bind(null, root)</code> —— 把 root 提前塞进函数</h4>
+    <p style="margin:6px 0"><code>bind</code> 是所有函数都有的方法，作用：<b>预填参数，返回一个新函数</b>。</p>
+    <pre>performConcurrentWorkOnRoot.bind(<span class="kw">null</span>, root)
+<span class="cm">//                            ↑     ↑</span>
+<span class="cm">//                        不绑 this  预填 root</span></pre>
+    <p style="margin:6px 0">得到的 <code>callback</code> 是一个只需要 1 个参数（<code>didTimeout</code>）的新函数，<code>root</code> 已经焊在里面。<b>类比：</b><code>onClick={() =&gt; handleDelete(item.id)}</code> —— <code>item.id</code> 焊进闭包，下游不用知道它。</p>
+
+    <h4 style="margin:12px 0 4px">③ <code>scheduleCallback(priority, callback)</code> —— Scheduler 的「排队入口」</h4>
+    <p style="margin:6px 0">Scheduler 包对外的核心 API。<b>把回调登记到 Scheduler 内部的最小堆，返回一个 task 对象。</b></p>
+    <pre><span class="cm">// 类比 setTimeout,但多了个优先级</span>
+<span class="fn">setTimeout</span>(callback, 100);                       <span class="cm">// 到点调</span>
+<span class="fn">scheduleCallback</span>(NormalPriority, callback);       <span class="cm">// 到点+时间片可用时调</span></pre>
+
+    <h4 style="margin:12px 0 4px">④ <code>NormalPriority</code> —— Scheduler 的优先级常量（不是 Lane！）</h4>
+    <p style="margin:6px 0">Scheduler 有它自己的一套优先级系统，只有 5 个级别，<b>比 Lane 简单得多</b>：</p>
+    <pre>ImmediatePriority    = 1   <span class="cm">// 立刻执行</span>
+UserBlockingPriority = 2   <span class="cm">// 用户交互</span>
+NormalPriority       = 3   <span class="cm">// 一般</span>
+LowPriority          = 4   <span class="cm">// 低</span>
+IdlePriority         = 5   <span class="cm">// 空闲</span></pre>
+    <p style="margin:6px 0"><b>Lane 是 React 的语言，Scheduler 优先级是 Scheduler 的语言</b>，中间有一层翻译：</p>
+    <pre><span class="fn">lanesToSchedulerPriority</span>(lanes)   <span class="cm">// Lane → Scheduler 优先级</span></pre>
+
+    <h4 style="margin:12px 0 4px">⑤ <code>task</code> —— Scheduler 内部的任务对象</h4>
+    <p style="margin:6px 0"><code>scheduleCallback</code> 返回一个 task 对象，是 Scheduler 为这次调度创建的记账条目。React 拿到后存在 <code>root.callbackNode</code>，后面可能用它做：</p>
+    <ul class="clean" style="margin:6px 0">
+      <li><b>取消</b>：<code>cancelCallback(task)</code> —— 有更高优来了，取消旧的</li>
+      <li><b>对比</b>：判断已排的任务是不是需要重排</li>
+    </ul>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>类比 setTimeout 返回的 id：</b><code>const id = setTimeout(fn, 100); clearTimeout(id);</code> —— task 就是「id」的升级版（不只是数字，是个完整对象）。</p>
+
+    <h4 style="margin:12px 0 4px">⑥ task 上的四个字段</h4>
+    <table class="simple">
+      <tr><th>字段</th><th>是什么</th><th>类比 setTimeout</th></tr>
+      <tr><td><code>callback</code></td><td>到点要跑的函数（就是 bind 出来那个）</td><td>setTimeout 的第一个参数</td></tr>
+      <tr><td><code>priorityLevel</code></td><td>Scheduler 优先级</td><td>决定在最小堆里的排位</td></tr>
+      <tr><td><code>startTime</code></td><td>什么时候可以开始跑（一般是 <code>now()</code>）</td><td>让 task 提前入堆但延迟启动</td></tr>
+      <tr><td><code>expirationTime</code></td><td>什么时候算超时要马上做</td><td>兜底：低优等太久也保证被执行</td></tr>
+    </table>
+
+    <h3 style="margin:14px 0 4px">📝 逐句翻译成人话</h3>
+    <pre><span class="kw">const</span> callback = performConcurrentWorkOnRoot.bind(<span class="kw">null</span>, root);
+<span class="cm">// 把"干这个 root 的活"打包好,root 焊进去,</span>
+<span class="cm">// 得到一个能直接 callback() 调的函数</span>
+
+<span class="kw">const</span> task = <span class="fn">scheduleCallback</span>(NormalPriority, callback);
+<span class="cm">// 告诉 Scheduler:"这函数用 Normal 优先级排队,到点你调用它"</span>
+<span class="cm">// Scheduler 建了个 task 条目扔进最小堆,把 task 返回给我</span>
+
+task = {
+  callback,           <span class="cm">// ← 刚才 bind 那个,到点会被调</span>
+  priorityLevel,      <span class="cm">// ← NormalPriority</span>
+  startTime,          <span class="cm">// ← 现在</span>
+  expirationTime      <span class="cm">// ← now + 5000ms 之类,超过就得强制做完</span>
+};</pre>
+    <div class="callout good" style="margin-top:8px"><b>Scheduler 眼里的世界只有 task 这个对象。</b>它不认识 root、Fiber、Lane，就是个「带优先级的 setTimeout」。到时机时调 <code>task.callback()</code>，后面所有事都在 callback 里的 React 世界发生。</div>
+  </div>
   <p>假设 App 中有一万个 Fiber，React 也不会提交一万个 Scheduler 任务。从 React 的角度看，通常是为一个 root 保留一个并发回调；回调真正执行后，Reconciler 才在内部逐个处理 Fiber。</p>
   <pre>root.callbackNode      <span class="cm">// 当前并发 Scheduler 任务；同步路径可能为 null</span>
 root.callbackPriority  <span class="cm">// root 当前已安排工作的 Lane 优先级</span></pre>
@@ -143,6 +208,104 @@ newPriority = <span class="fn">getHighestPriorityLane</span>(nextLanes);
 }
   root.callbackPriority = newPriority;</pre>
   <div class="callout good"><b>为什么 Sync 能明显插队？</b>Transition 通常等待 Scheduler 的并发回调，并且工作循环会让位；Sync 更新改走同步刷新入口。当前 JavaScript 任务结束进入微任务检查后，React 会尽快完成 Sync Render/Commit。</div>
+  <div class="card">
+    <h3 style="margin-top:0">🔀 澄清：Sync / Concurrent 在 React 里到底指什么</h3>
+    <p style="margin:6px 0"><code>Sync</code> 和 <code>Concurrent</code> 这两个词在 React 里其实指代 <b>3 层不同的东西</b>，容易混：</p>
+    <table class="simple">
+      <tr><th>层次</th><th>Sync 是啥</th><th>Concurrent 是啥</th></tr>
+      <tr><td><b>① 应用模式</b>（老/新）</td><td><code>ReactDOM.render</code>（React 17 Legacy）</td><td><code>createRoot</code>（React 18+）</td></tr>
+      <tr><td><b>② Lane 优先级</b></td><td><code>SyncLane</code>（最高优 bit）</td><td>TransitionLane、DefaultLane 等其它 lane</td></tr>
+      <tr><td><b>③ 渲染路径</b>（这段代码在讲的）</td><td>Sync 路径：微任务刷新</td><td>Concurrent 路径：Scheduler 时间切片</td></tr>
+    </table>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>关键：</b>用了 <code>createRoot</code> <b>不代表所有更新都「并发」</b> —— SyncLane 依然走同步路径。同一个 app 里两条路径<b>并存</b>，看每个 update 的 lane 走哪条。</p>
+
+    <h3 style="margin:12px 0 4px">两条渲染路径的核心对比（层次 ③）</h3>
+    <table class="simple">
+      <tr><th></th><th>Sync 路径</th><th>Concurrent 路径</th></tr>
+      <tr><td>触发 API</td><td><code>scheduleSyncCallback(fn)</code></td><td><code>scheduleCallback(prio, fn)</code></td></tr>
+      <tr><td>内部机制</td><td>syncQueue + <code>queueMicrotask</code></td><td>Scheduler 最小堆 + <code>MessageChannel</code></td></tr>
+      <tr><td>执行时机</td><td>当前 JS 任务尾的<b>微任务</b></td><td>后续宏任务里 Scheduler tick 到</td></tr>
+      <tr><td>用的循环</td><td><code>workLoopSync</code></td><td><code>workLoopConcurrent</code></td></tr>
+      <tr><td>能让位吗</td><td>❌ 一口气跑完</td><td>✅ 每个 fiber 处理完检查 <code>shouldYield()</code></td></tr>
+      <tr><td>能被抢占吗</td><td>❌</td><td>✅ 高优来了 cancel + 重建 WIP</td></tr>
+      <tr><td>触发 lane</td><td>SyncLane</td><td>其它 lane</td></tr>
+      <tr><td>典型场景</td><td>click / input / <code>flushSync</code></td><td><code>startTransition</code>、<code>useDeferredValue</code></td></tr>
+    </table>
+
+    <h3 style="margin:12px 0 4px">前端类比</h3>
+    <ul class="clean" style="margin:6px 0">
+      <li><b>Sync 路径 ≈ <code>queueMicrotask(fn)</code></b> —— 当前同步代码一结束就跑，浏览器还没来得及 paint，微任务里也不让位</li>
+      <li><b>Concurrent 路径 ≈ <code>requestIdleCallback</code> + 手动 5ms 让位</b> —— 排到宏任务队列里等，跑起来还会让位给浏览器 paint / 用户输入</li>
+    </ul>
+
+    <h3 style="margin:12px 0 4px">决策分支图</h3>
+    <pre>setState 触发
+    │
+    ▼
+requestUpdateLane 算出 lane
+    │
+    ▼
+ensureRootIsScheduled
+    │
+    ├─ lane === SyncLane ? ─── YES ──→ <b>Sync 路径</b>
+    │                                    scheduleSyncCallback
+    │                                    → queueMicrotask
+    │                                    → 当前 JS 结束立刻跑
+    │                                    → workLoopSync (不让位)
+    │                                    → commit
+    │
+    └─ 其它 lane ──────────── NO ──→ <b>Concurrent 路径</b>
+                                       scheduleCallback(Scheduler)
+                                       → MessageChannel 排宏任务
+                                       → Scheduler tick 到才跑
+                                       → workLoopConcurrent (每片让位)
+                                       → 可能被高优抢占重来
+                                       → commit</pre>
+
+    <h3 style="margin:12px 0 4px">具体：哪种 setState 走哪条路</h3>
+    <table class="simple">
+      <tr><th>场景</th><th>lane</th><th>路径</th></tr>
+      <tr><td>离散事件回调（click / keydown / input）里的 setState</td><td>SyncLane</td><td><b>Sync</b></td></tr>
+      <tr><td><code>startTransition(() =&gt; setX(...))</code></td><td>TransitionLane</td><td><b>Concurrent</b></td></tr>
+      <tr><td><code>setTimeout</code> / <code>Promise.then</code> 里的普通 setState</td><td>DefaultLane</td><td><b>Concurrent</b></td></tr>
+      <tr><td><code>flushSync(() =&gt; setX(...))</code></td><td>强制降级 SyncLane</td><td><b>Sync</b>（临时切）</td></tr>
+    </table>
+
+    <h3 style="margin:12px 0 4px">时间线：两条路径怎么共存</h3>
+    <pre>t=0   startTransition(() =&gt; setBigList)
+      → lane = TransitionLane
+      → <b>Concurrent 路径:排 Scheduler task</b>
+
+t=1   Scheduler 分片跑 concurrent render(慢慢渲大列表)
+
+t=2   用户点按钮 setX(1)
+      → lane = SyncLane
+      → <b>Sync 路径:</b>
+        • cancelCallback(旧 concurrent task) <span class="cm">★取消低优</span>
+        • scheduleSyncCallback → queueMicrotask
+
+t=3   当前 click 回调结束
+      → 微任务立刻跑 → performSyncWorkOnRoot
+      → workLoopSync 一口气跑完 → commit(Sync 上屏)
+
+t=4   Sync commit 后 ensureRootIsScheduled 又看一眼
+      → pendingLanes 还有 TransitionLane
+      → 重排 concurrent task
+
+t=5   Scheduler 继续跑 concurrent render → commit(Transition 上屏)</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>同一个 app 里，两条路径可以在几毫秒内交错触发。</b></p>
+
+    <h3 style="margin:12px 0 4px">常见误解</h3>
+    <table class="simple">
+      <tr><th>误解</th><th>事实</th></tr>
+      <tr><td>React 18 所有更新都是并发的</td><td>❌ SyncLane 还是走同步路径，跟 17 类似</td></tr>
+      <tr><td>concurrent 比 sync 快</td><td>❌ concurrent 单次渲染反而更慢（有分片开销），换来的是「不阻塞交互」</td></tr>
+      <tr><td>同步 = 老版本、并发 = 新版本</td><td>❌ 18 里两条路并存，看 lane 分别走</td></tr>
+      <tr><td><code>flushSync</code> 让 concurrent 变 sync</td><td>✅ 对，临时切到 Sync 路径立刻刷</td></tr>
+    </table>
+
+    <div class="callout good" style="margin-top:10px"><b>一句话记忆：</b>Sync 路径 = 「微任务里立刻做完，不让位不被打断」；Concurrent 路径 = 「宏任务里排队做，5ms 让一次位，随时可能被高优抢占」。用户交互走 Sync 保证跟手；<code>startTransition</code>、大列表更新走 Concurrent 保证不卡输入。<b>两条路径各司其职、并存于同一 app。</b></div>
+  </div>
   <div class="callout"><b><code>cancelCallback</code> 取消的只是 Scheduler 任务。</b>它不会删除 update，也不会回滚 DOM，因为低优 Render 根本还没有进入 Commit。update 仍在 Hook/Class 的更新队列中，对应 Lane 仍留在 <code>root.pendingLanes</code>。</div>
   <h2><span class="dot" style="background:var(--warn)"></span>抢占发生时，内存里每样东西去了哪里</h2>
   <p>先区分四样东西，它们不是同一个对象：</p>
@@ -178,6 +341,118 @@ root.finishedWork = <span class="kw">null</span>;                  <span class="
   <div class="callout warn"><b>“丢弃低优 WIP”丢的是计算结果，不是更新请求。</b>半成品 Fiber 上算出的 props/state/flags 没有提交，可以覆盖；原始 Transition update 仍保存在队列中，所以稍后能够重新算出正确结果。</div>
 
   <div class="card">
+    <h3 style="margin-top:0">🎨 一次串起来：内存里 5 样东西怎么互动</h3>
+    <p style="margin:6px 0">上面的表格和 A/B 两种情况密度大，配一张关系图和画画类比就通了。先看 5 样东西的关系：</p>
+    <pre>                     内存中同时存在的东西
+   ┌─────────────────────────────────────────────────────┐
+   │                                                       │
+   │   ┌──────────────┐          ┌──────────────┐         │
+   │   │  current 树  │◄────────►│    WIP 树    │         │
+   │   │  (屏幕对应)  │ alternate│  (正在算的) │         │
+   │   └──────┬───────┘          └──────┬───────┘         │
+   │          │                          │                 │
+   │    root.current           workInProgress             │
+   │    (屏幕就是它)          (指针:下一个算哪)          │
+   │          │                                            │
+   │          ▼                                            │
+   │       真实 DOM ◄─── 用户实际看到的                    │
+   │                                                       │
+   │   ─────────────────────────────────────────           │
+   │                                                       │
+   │   root.pendingLanes  = 全局待办 lane 集合              │
+   │                                                       │
+   │   每个组件 fiber 上:                                   │
+   │     updateQueue.shared.pending = update 环(未消耗)     │
+   │     updateQueue.baseQueue      = 上轮跳过的 update     │
+   └─────────────────────────────────────────────────────┘</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>关键：</b><code>current</code> 和 <code>WIP</code> <b>不是两棵独立的树</b>，通过 <code>alternate</code> 字段互相指向，共享大部分节点 —— 只是双缓存的两个视角。</p>
+
+    <h3 style="margin:12px 0 4px">画画类比：一秒分清 5 样东西</h3>
+    <p style="margin:6px 0">想象你是画家：</p>
+    <table class="simple">
+      <tr><th>React 概念</th><th>画画类比</th></tr>
+      <tr><td><code>current</code> 树</td><td><b>挂墙上的成品画</b>（用户已经看到的）</td></tr>
+      <tr><td>WIP 树</td><td><b>画室里的草稿</b>（正在改的）</td></tr>
+      <tr><td><code>workInProgress</code> 指针</td><td><b>画笔当前落在纸上哪一点</b></td></tr>
+      <tr><td><code>update</code> 队列</td><td><b>客户给的需求笔记</b>（帽子改红色、背景加月亮...）</td></tr>
+      <tr><td>WIP 上算过的 props/state/flags</td><td><b>草稿上已经上过色的部分</b></td></tr>
+      <tr><td>真实 DOM</td><td><b>墙上那张成品</b>，客户能看到</td></tr>
+    </table>
+    <p style="margin:6px 0"><b>创作流程：</b>看着墙上的成品（current）→ 拿新纸（WIP）对着笔记（update）一笔笔画 → 画完摘下旧画挂新画（commit）。</p>
+
+    <h3 style="margin:12px 0 4px">场景 A 具体走一遍：时间片结束（暂停，不是抢占）</h3>
+    <p style="margin:6px 0"><b>你画到主角的鼻子，累了要休息：</b></p>
+    <pre>草稿(WIP):              已画完头发、眼睛,正在画鼻子   ← 半成品保留
+画笔位置(workInProgress): 停在鼻子右边                   ← 保留
+挂墙上的成品(current):    老样子                         ← 保留
+客户笔记(update 队列):    全部还在                       ← 保留</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">休息完继续从鼻子右边接着画，半成品草稿<b>没动过</b> —— 下次用同一张纸。<b>没人受损，一切原样保留</b>。</p>
+
+    <h3 style="margin:12px 0 4px">场景 B 具体走一遍：Sync 抢占（真·丢弃）</h3>
+    <p style="margin:6px 0"><b>你画到鼻子时，客户跑进来：「先给墙上那张加副眼镜（Sync）！」</b> —— 你手上这张草稿其实用不上了。</p>
+
+    <p style="margin:12px 0 4px"><b>步骤 1：取消当前的画</b></p>
+    <pre><span class="fn">cancelCallback</span>(旧 concurrent task);   <span class="cm">// Scheduler 别再叫我继续画</span></pre>
+
+    <p style="margin:12px 0 4px"><b>步骤 2：<code>prepareFreshStack(root, SyncLane)</code> —— 准备新草稿</b></p>
+    <pre>workInProgress = <span class="fn">createWorkInProgress</span>(root.current, <span class="kw">null</span>);
+workInProgressRootRenderLanes = SyncLane;</pre>
+    <p style="margin:6px 0"><b>关键理解：</b><code>createWorkInProgress</code> 不是真的丢一张纸再拿一张新的。它做的是：</p>
+    <ol style="margin:4px 0;padding-left:22px">
+      <li>复用 <code>current.alternate</code>（就是"画了一半的鼻子"那个 fiber 对象）</li>
+      <li><b>重置</b>上面的关键字段：<code>memoizedState</code>、<code>flags</code>、<code>lanes</code>、<code>childLanes</code> —— 把"画过的痕迹擦掉"</li>
+      <li>让 <code>workInProgress</code> 指针<b>重新指向 root</b>（画笔挪回起点）</li>
+    </ol>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>丢弃的是什么？</b>fiber 节点上"算了一半的计算结果"（memoizedState / flags 等）。fiber 对象本身<b>复用</b>了，节省 GC。</p>
+
+    <p style="margin:12px 0 4px"><b>步骤 3：Sync render</b></p>
+    <p style="margin:6px 0">从 root 从头遍历，处理每个 fiber 的 update 队列：</p>
+    <ul class="clean" style="margin:6px 0">
+      <li>遇到 Sync update → <b>执行</b></li>
+      <li>遇到 Transition update → <b>跳过</b>，存进 baseQueue</li>
+    </ul>
+    <p style="margin:6px 0;color:var(--warn);font-size:12.5px">⚠️ <b>注意：</b>Transition update <b>没有丢</b>！它只是被跳过，进了 baseQueue 等下轮。</p>
+
+    <p style="margin:12px 0 4px"><b>步骤 4：Sync commit → 上屏</b></p>
+    <p style="margin:6px 0">真实 DOM 更新：加眼镜完成。<b>用户看到了。</b></p>
+
+    <p style="margin:12px 0 4px"><b>步骤 5：Sync 完了，Transition 还没干</b></p>
+    <pre>root.pendingLanes 现在只剩 TransitionLane
+ensureRootIsScheduled 又跑一遍 → 排新的 concurrent task</pre>
+
+    <p style="margin:12px 0 4px"><b>步骤 6：Scheduler 重新跑 Transition</b></p>
+    <p style="margin:6px 0"><code>prepareFreshStack(root, TransitionLane)</code> → workInProgress 又回 root → 从头 render。这次 List 组件 UpdateQueue 里，<code>baseQueue</code> 那个 <code>setItems</code> 还在，重新执行 → commit。</p>
+
+    <h3 style="margin:14px 0 4px">"丢弃低优 WIP" 三个关键问答</h3>
+    <table class="simple">
+      <tr><th>问</th><th>答</th></tr>
+      <tr><td><b>Q1：</b>丢的是 update 吗？</td><td><b>不是</b>。update 全在 <code>fiber.updateQueue</code> 里保留。丢的是"上一轮处理 update 后算出的中间结果"</td></tr>
+      <tr><td><b>Q2：</b>DOM 会变吗？</td><td><b>不会</b>。半成品 WIP <b>从来没进入 commit</b>，DOM 只在 commit 时被修改</td></tr>
+      <tr><td><b>Q3：</b>数据会丢吗？</td><td><b>不会</b>。update 是"操作意图"（"我想把 count 加 1"）不是"结果"（"count 现在是 5"），重跑能算出相同结果</td></tr>
+    </table>
+
+    <h3 style="margin:12px 0 4px">场景 A vs 场景 B 一图对比</h3>
+    <table class="simple">
+      <tr><th>东西</th><th>场景 A（让位）</th><th>场景 B（抢占）</th></tr>
+      <tr><td><code>workInProgress</code></td><td>✅ 保留原位置</td><td>⚠️ 重置回 root</td></tr>
+      <tr><td>WIP 树上的半成品</td><td>✅ 保留</td><td>⚠️ 字段重置（fiber 复用）</td></tr>
+      <tr><td><code>renderLanes</code></td><td>✅ 保留（仍是 Transition）</td><td>⚠️ 改为新 lane</td></tr>
+      <tr><td>current 树 / DOM</td><td>✅ 不变</td><td>✅ 不变</td></tr>
+      <tr><td>update 队列</td><td>✅ 不变</td><td>✅ 不变（跳过的存 baseQueue）</td></tr>
+    </table>
+
+    <div class="callout good" style="margin-top:10px"><b>一句话记忆：</b>
+      <ul class="clean" style="margin:6px 0 0">
+        <li><b>update 是「操作意图」</b>，永远不丢 —— 保证结果最终正确</li>
+        <li><b>WIP 树是「计算过程的临时快照」</b>，可以随时丢 —— 它没进 DOM</li>
+        <li><b>current 树 = 用户当前看到的</b>，永远等新 render 完全跑完才切换</li>
+        <li><b>workInProgress 指针 = 「下一步算哪」</b>，让位时保留，抢占时重置</li>
+      </ul>
+      <p style="margin:8px 0 0"><b>React 所有并发保证都建立在这个约束上：中间状态永远不上屏，DOM 只在完整 commit 时才变。</b></p>
+    </div>
+  </div>
+
+  <div class="card">
     <b>抢占前后，三层状态的变化</b>
     <table class="simple" style="margin-bottom:0">
       <tr><th>时刻</th><th>current / DOM</th><th>WIP</th><th>pending updates</th></tr>
@@ -203,6 +478,249 @@ root.finishedWork = <span class="kw">null</span>;                  <span class="
     <li>Scheduler 再次给 root 执行机会：从这个指针继续。</li>
   </ul>
   <div class="callout warn"><b>Fiber 与时间切片的真正关系：</b>Scheduler 只说“现在该暂停了”；Fiber 链表结构让 React 知道暂停在哪里、下次从哪里继续。没有 Fiber 这种工作单元，Scheduler 即使要求让位，React 也很难保存一半的树计算进度。</div>
+
+  <div class="card">
+    <h3 style="margin-top:0">🎬 展开：Scheduler 和 Fiber 的两层分工</h3>
+    <p style="margin:6px 0">上面这段的核心是<b>两层控制反转</b>——Scheduler 掌握「何时停」，Fiber 掌握「停在哪、怎么续」。分开讲。</p>
+
+    <h3 style="margin:12px 0 4px">workLoopConcurrent 每一句拆开</h3>
+    <pre><span class="kw">function</span> <span class="fn">workLoopConcurrent</span>() {
+  <span class="kw">while</span> (workInProgress !== <span class="kw">null</span> &amp;&amp; !<span class="fn">shouldYield</span>()) {
+    <span class="fn">performUnitOfWork</span>(workInProgress);
+  }
+}</pre>
+    <ul class="clean" style="margin:6px 0">
+      <li><b><code>workInProgress</code>：</b>模块级变量，存"下一个要处理的 fiber"。上次让位时它保留了位置，这次进循环从它开始 —— <b>它就是 Fiber 世界里的"书签"</b>。</li>
+      <li><b><code>shouldYield()</code>：</b>Scheduler 提供的"该停了吗"检查。时间用光或有更急任务，返回 true。<b>谁在调它？Reconciler。</b>Scheduler 只负责回答，不主动打断。</li>
+      <li><b><code>performUnitOfWork</code>：</b>处理<b>一个</b> fiber，不是整棵子树。处理完修改 <code>workInProgress</code> 指针指向下一个。</li>
+    </ul>
+
+    <h3 style="margin:12px 0 4px">performUnitOfWork 内部：这才是「可暂停」的关键</h3>
+    <pre><span class="kw">function</span> <span class="fn">performUnitOfWork</span>(unitOfWork){
+  <span class="kw">const</span> next = <span class="fn">beginWork</span>(unitOfWork.alternate, unitOfWork, renderLanes);
+  <span class="cm">//           ↑ 处理这个 fiber,有子节点返回 child,否则返回 null</span>
+  <span class="kw">if</span> (next === <span class="kw">null</span>) {
+    <span class="fn">completeUnitOfWork</span>(unitOfWork);   <span class="cm">// 无子,回归(找 sibling 或往上)</span>
+  } <span class="kw">else</span> {
+    workInProgress = next;              <span class="cm">// 有子,深入</span>
+  }
+}</pre>
+    <p style="margin:6px 0"><b>遍历顺序（举例）</b>：</p>
+    <pre>         A
+        / \
+       B   E
+      / \
+     C   D
+
+访问顺序:
+  begin A → begin B → begin C → complete C
+→ begin D → complete D → complete B
+→ begin E → complete E → complete A</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">每次访问一个 fiber 就是"一个工作单元"（一次 <code>performUnitOfWork</code>）。<b>每个工作单元之间都是可让位点</b>。</p>
+
+    <h3 style="margin:12px 0 4px">递归 vs 迭代：Fiber 为什么天然「可暂停」</h3>
+    <p style="margin:6px 0"><b>React 15（Stack Reconciler）—— 递归</b>：</p>
+    <pre><span class="kw">function</span> <span class="fn">render</span>(fiber){
+  <span class="fn">process</span>(fiber);
+  <span class="kw">for</span> (<span class="kw">const</span> child <span class="kw">of</span> fiber.children){
+    <span class="fn">render</span>(child);   <span class="cm">// ← 一进递归就出不来</span>
+  }
+}
+<span class="fn">render</span>(root);   <span class="cm">// 一口气跑完,期间无法让位</span></pre>
+    <p style="margin:6px 0"><b>调用栈是 JS 引擎的黑盒</b>：你看不见递归到哪一层、没法保存栈上的进度、只能一口气跑完。</p>
+
+    <p style="margin:12px 0 4px"><b>React 16+（Fiber）—— 迭代</b>：</p>
+    <pre><span class="kw">let</span> workInProgress = root;   <span class="cm">// ← 关键:一个"看得见"的指针</span>
+<span class="kw">while</span> (workInProgress !== <span class="kw">null</span> &amp;&amp; !<span class="fn">shouldYield</span>()){
+  <span class="fn">performUnitOfWork</span>(workInProgress);  <span class="cm">// 内部会移动指针</span>
+}
+<span class="cm">// 循环 break 出来时,workInProgress 保留在最后位置</span></pre>
+    <div class="callout" style="margin-top:8px"><b>核心差别：</b>递归的<b>进度存在调用栈里</b>，JS 引擎管，你动不了。迭代的<b>进度存在一个变量里</b>，你自己管，随时可保存/恢复。<b>Fiber 就是把「树的深度优先遍历」从递归改成迭代的产物</b>——为此每个节点必须有 <code>child / sibling / return</code> 三个指针帮迭代找路。</div>
+
+    <h3 style="margin:12px 0 4px">前端类比：像 generator 或分批处理</h3>
+    <p style="margin:6px 0"><b>类比 1：generator 函数</b></p>
+    <pre><span class="kw">function</span>* <span class="fn">traverseTree</span>(root){
+  <span class="kw">yield</span> root;                        <span class="cm">// ★让位点</span>
+  <span class="kw">for</span> (<span class="kw">const</span> child <span class="kw">of</span> root.children){
+    <span class="kw">yield</span>* <span class="fn">traverseTree</span>(child);
+  }
+}
+
+<span class="kw">const</span> iter = <span class="fn">traverseTree</span>(fiberTree);
+<span class="kw">while</span> (!<span class="fn">shouldYield</span>()){
+  <span class="kw">const</span> {value, done} = iter.<span class="fn">next</span>();  <span class="cm">// 每次拿一个</span>
+  <span class="fn">processFiber</span>(value);
+}</pre>
+
+    <div class="card" style="border-left:3px solid var(--sched);margin:8px 0">
+      <h4 style="margin:0 0 6px">📘 <code>generator</code> 速成：大多数前端没写过，先补一下</h4>
+      <p style="margin:6px 0"><b>普通函数一进去必须跑完；<code>function*</code> 带星号的 generator 可以「暂停」。</b></p>
+      <pre><span class="kw">function</span>* <span class="fn">foo</span>(){
+  console.<span class="fn">log</span>(1);
+  <span class="kw">yield</span>;           <span class="cm">// ★暂停点</span>
+  console.<span class="fn">log</span>(2);
+  <span class="kw">yield</span>;
+  console.<span class="fn">log</span>(3);
+}
+
+<span class="kw">const</span> gen = <span class="fn">foo</span>();    <span class="cm">// ⚠️ 调用不会立刻执行,只是拿到"迭代器"</span>
+gen.<span class="fn">next</span>();  <span class="cm">// 打印 1,停在第一个 yield</span>
+gen.<span class="fn">next</span>();  <span class="cm">// 从暂停点恢复,打印 2,停在第二个</span>
+gen.<span class="fn">next</span>();  <span class="cm">// 打印 3,函数结束</span></pre>
+      <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>神奇之处：</b>函数被「冻结」在 yield 那行，下次 <code>.next()</code> 从那行继续。JS 引擎帮你自动保存函数内部所有状态（局部变量、for 走到哪、if 进哪个分支）。</p>
+
+      <p style="margin:12px 0 4px"><b><code>yield</code> 还能带值，<code>.next()</code> 返回 <code>{value, done}</code>：</b></p>
+      <pre><span class="kw">function</span>* <span class="fn">counter</span>(){ <span class="kw">yield</span> <span class="st">'a'</span>; <span class="kw">yield</span> <span class="st">'b'</span>; <span class="kw">yield</span> <span class="st">'c'</span>; }
+<span class="kw">const</span> iter = <span class="fn">counter</span>();
+iter.<span class="fn">next</span>();  <span class="cm">// { value: 'a', done: false }</span>
+iter.<span class="fn">next</span>();  <span class="cm">// { value: 'b', done: false }</span>
+iter.<span class="fn">next</span>();  <span class="cm">// { value: 'c', done: false }</span>
+iter.<span class="fn">next</span>();  <span class="cm">// { value: undefined, done: true }</span></pre>
+
+      <p style="margin:12px 0 4px"><b><code>yield*</code> 委托给另一个 generator（把它的 yield 都接力出去）：</b></p>
+      <pre><span class="kw">function</span>* <span class="fn">inner</span>(){ <span class="kw">yield</span> <span class="st">'a'</span>; <span class="kw">yield</span> <span class="st">'b'</span>; }
+<span class="kw">function</span>* <span class="fn">outer</span>(){
+  <span class="kw">yield</span> 1;
+  <span class="kw">yield</span>* <span class="fn">inner</span>();   <span class="cm">// ← 把 inner 的 yield 都在这里接力出去</span>
+  <span class="kw">yield</span> 2;
+}
+[...<span class="fn">outer</span>()]   <span class="cm">// [1, 'a', 'b', 2]</span></pre>
+      <p style="margin:6px 0;color:var(--dim);font-size:12.5px">这就是递归 generator 的核心 —— 上面 <code>traverseTree</code> 里就是靠 <code>yield*</code> 递归遍历子树的。</p>
+
+      <h4 style="margin:12px 0 4px">🌳 具体走一遍 <code>traverseTree(A)</code></h4>
+      <pre>       A
+      / \
+     B   E
+    / \
+   C   D</pre>
+      <pre>第 1 次 next():  yield A                                       ↩ A
+第 2 次 next():  进 A 的 for, yield* traverseTree(B) → yield B     ↩ B
+第 3 次 next():  进 B 的 for, yield* traverseTree(C) → yield C     ↩ C
+第 4 次 next():  C 无子结束,回 B 的 for, yield* traverseTree(D)    ↩ D
+第 5 次 next():  D 结束,回 A 的 for, yield* traverseTree(E)        ↩ E
+第 6 次 next():  全部结束                                          ↩ {done: true}</pre>
+      <p style="margin:6px 0"><b>顺序：A → B → C → D → E</b> —— 就是深度优先遍历。</p>
+
+      <h4 style="margin:12px 0 4px">🔑 神奇之处：break 出 while 后，迭代器状态还在</h4>
+      <pre><span class="kw">const</span> iter = <span class="fn">traverseTree</span>(fiberTree);   <span class="cm">// ← 拿到迭代器,还没开始</span>
+<span class="kw">while</span> (!<span class="fn">shouldYield</span>()){
+  <span class="kw">const</span> {value, done} = iter.<span class="fn">next</span>();
+  <span class="kw">if</span> (done) <span class="kw">break</span>;
+  <span class="fn">processFiber</span>(value);
+}
+<span class="cm">// 5ms 用光 → shouldYield() 返 true → break 出 while</span>
+<span class="cm">// 但 iter 变量还在!它内部保存着"下次从哪个 yield 继续"</span>
+
+<span class="cm">// 下一个时间片:</span>
+<span class="kw">while</span> (!<span class="fn">shouldYield</span>()){
+  <span class="kw">const</span> {value, done} = iter.<span class="fn">next</span>();   <span class="cm">// ← 从上次暂停点继续!</span>
+  ...
+}</pre>
+      <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>generator 自动帮你保存「遍历到哪了」这个状态。</b>什么都不用干，直接 <code>iter.next()</code> 就从原地续。</p>
+
+      <h4 style="margin:12px 0 4px">🔀 映射到 Fiber</h4>
+      <table class="simple">
+        <tr><th>generator 版本</th><th>Fiber 版本</th></tr>
+        <tr><td><code>yield</code> 暂停点</td><td>每个 fiber 处理完的位置</td></tr>
+        <tr><td>迭代器内部状态（JS 引擎自动管）</td><td><code>workInProgress</code> 指针（手动管）</td></tr>
+        <tr><td><code>iter.next()</code></td><td>下次循环从 <code>workInProgress</code> 开始</td></tr>
+        <tr><td><code>yield*</code> 递归</td><td><code>child</code>/<code>sibling</code>/<code>return</code> 三指针遍历</td></tr>
+      </table>
+      <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>为什么 React 不直接用 generator？</b>（1）每次 <code>.next()</code> 有上下文切换开销，累积起来慢；（2）generator 遍历路径一旦生成就固定，Fiber 可以抢占时随意改指针；（3）早期兼容性。<b>但功能等价 —— 理解 generator 就理解了 Fiber 遍历的心智模型。</b></p>
+    </div>
+
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>回到主线：</b>Fiber 手动实现了 generator 的效果 —— 用 <code>workInProgress</code> 指针代替 <code>yield</code>，用 <code>beginWork</code>/<code>completeWork</code> 代替 yield 之间的代码。</p>
+
+    <p style="margin:12px 0 4px"><b>类比 2：分批处理大数组（你可能写过）</b></p>
+    <pre><span class="kw">let</span> index = 0;
+<span class="kw">function</span> <span class="fn">processChunk</span>(){
+  <span class="kw">const</span> start = performance.<span class="fn">now</span>();
+  <span class="kw">while</span> (index &lt; items.length &amp;&amp; performance.<span class="fn">now</span>() - start &lt; 5){
+    <span class="fn">process</span>(items[index]);
+    index++;                          <span class="cm">// ← 保存进度</span>
+  }
+  <span class="kw">if</span> (index &lt; items.length){
+    <span class="fn">setTimeout</span>(processChunk, 0);      <span class="cm">// ← 让位,下轮继续</span>
+  }
+}</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px">对照关系：<code>index</code> = <code>workInProgress</code>；<code>performance.now() - start &lt; 5</code> = <code>!shouldYield()</code>；<code>setTimeout(processChunk, 0)</code> = Scheduler 排下一片；<code>items[index]</code> = fiber 树下一个节点。<b>你其实早就写过这个模式了</b>，只是 React 把它做得更精细。</p>
+
+    <h3 style="margin:12px 0 4px">暂停后怎么恢复：Scheduler 续作机制</h3>
+    <p style="margin:6px 0"><b>关键问题：</b><code>workLoopConcurrent</code> break 出来后，Scheduler 怎么知道要回来？</p>
+    <pre><span class="kw">function</span> <span class="fn">performConcurrentWorkOnRoot</span>(root, didTimeout){
+  <span class="kw">const</span> lanes = <span class="fn">getNextLanes</span>(root);
+  <span class="kw">const</span> status = <span class="fn">renderRootConcurrent</span>(root, lanes);
+  <span class="cm">//             ↑ 里面调 workLoopConcurrent</span>
+
+  <span class="kw">if</span> (status === RootInProgress) {
+    <span class="cm">// 还没渲完(时间片打断),返回自己作为续作</span>
+    <span class="kw">return</span> performConcurrentWorkOnRoot.bind(<span class="kw">null</span>, root);   <span class="cm">// ★</span>
+  }
+  <span class="fn">commitRoot</span>(root);   <span class="cm">// 渲完了才提交</span>
+}</pre>
+    <p style="margin:6px 0"><b>流程：</b></p>
+    <pre>Scheduler 分了 5ms 给你
+  → 调 callback = performConcurrentWorkOnRoot
+  → callback 里调 workLoopConcurrent
+  → workLoop 处理了 30 个 fiber, shouldYield()=true, break
+  → workInProgress 保留在第 31 个 fiber
+  → performConcurrentWorkOnRoot 判断"没渲完",返回自己
+  → Scheduler 收到"续作",重新入堆
+
+Scheduler 下一片又轮到我
+  → 又调 callback (还是 performConcurrentWorkOnRoot)
+  → callback 里 workLoopConcurrent 从 workInProgress 继续
+  → 处理第 31, 32, 33... 个 fiber</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>Scheduler 只做两件事：分片 + 再叫我。</b>具体从哪里继续，是 React 内部靠 <code>workInProgress</code> 记住的。</p>
+
+    <h3 style="margin:12px 0 4px">如果没有 Fiber 会怎样（反证）</h3>
+    <pre><span class="kw">function</span> <span class="fn">render</span>(fiber){
+  <span class="fn">process</span>(fiber);
+  <span class="kw">for</span> (<span class="kw">const</span> child <span class="kw">of</span> fiber.children){
+    <span class="kw">if</span> (<span class="fn">shouldYield</span>()) <span class="kw">return</span> ???;   <span class="cm">// ← 让位怎么办?</span>
+    <span class="fn">render</span>(child);
+  }
+}</pre>
+    <p style="margin:6px 0"><b>问题：</b></p>
+    <ul class="clean" style="margin:6px 0">
+      <li>我 return 了，父级递归怎么知道该继续还是终止？</li>
+      <li>就算它知道要"记住位置"，怎么记？调用栈里还有 100 层等着回归呢</li>
+      <li>下次怎么"从中间某一层"继续？没辙</li>
+    </ul>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>只能一口气跑完。</b>所以 React 15 时代想让位是<b>架构上做不到</b>——不是不想，而是不能。<b>Fiber 把"隐式的调用栈"变成"显式的链表"</b>：显式 = 我能看、能存、能改。让位就变成"把指针留原地"，恢复就变成"从指针继续"。</p>
+
+    <h3 style="margin:12px 0 4px">Scheduler / Reconciler / Fiber 三方交互图</h3>
+    <pre>Scheduler                           React Reconciler                Fiber 树
+
+分了 5ms 时间片                       │                                │
+    │                                │                                │
+    │ 调 callback()                  │                                │
+    ├───────────────────────────────►│                                │
+    │                                │ workLoopConcurrent 开始         │
+    │                                │   while(!shouldYield()){       │
+    │◄─── 问:该停了吗? ────┐          │     performUnitOfWork ─────────►│ 走 child
+    │  没到 5ms,返 false ──┘          │   }                            │ 走 sibling
+    │◄─── 又问一次 ─────────┐         │                                │ 走 return
+    │  到 5ms 了,返 true ────┘         │                                │
+    │                                │  break; workInProgress 停留     │
+    │◄── 返回续作(如果没完) ───────────┤                                │
+    │                                │                                │
+    │ 再分下一片时间                    │                                │
+    │ 又调 callback()                 │                                │
+    ├───────────────────────────────►│  从 workInProgress 继续          │
+    │                                │  ...                            │
+    │                                │                                │
+    │◄── 处理完了 ─────────────────────┤ commitRoot                     │</pre>
+
+    <div class="callout good" style="margin-top:10px"><b>一句话记忆：</b>
+      <ul class="clean" style="margin:6px 0 0">
+        <li><b>Scheduler 说「该停了」</b>（<code>shouldYield()</code>）</li>
+        <li><b>Fiber 结构让「能停」&「能续」</b>（<code>workInProgress</code> + 链表指针）</li>
+        <li>两者<b>缺一不可</b>：光有 Scheduler 没 Fiber = 递归里想让位也让不了；光有 Fiber 没 Scheduler = 无人告诉何时让位</li>
+      </ul>
+      <p style="margin:8px 0 0"><b>Scheduler 是「何时」，Fiber 是「如何」—— 完美分工。</b></p>
+    </div>
+  </div>
 
   <h2><span class="dot" style="background:var(--warn)"></span>到底是谁可打断：答案是并发 Render 工作循环</h2>
   <table class="simple">
@@ -279,6 +797,194 @@ channel.port1.onmessage = performWorkUntilDeadline;
   <span class="kw">return</span> <span class="fn">getCurrentTime</span>() - startTime &gt;= frameInterval;
 }</pre>
 
+  <div class="card">
+    <h3 style="margin-top:0">📖 逐句拆解上面这段 MessageChannel 代码</h3>
+    <p style="margin:6px 0">这段代码藏了 Scheduler 最核心的工程决策。分层看。</p>
+
+    <h3 style="margin:12px 0 4px">先明确目标</h3>
+    <p style="margin:6px 0">React 想实现：<b>干一片活（5ms）→ 让浏览器 paint + 处理输入 → 再干下一片</b>。</p>
+    <p style="margin:6px 0">JS 里"排队再执行"有好几种方案：</p>
+    <table class="simple">
+      <tr><th>方案</th><th>类型</th><th>问题</th></tr>
+      <tr><td><code>setTimeout(fn, 0)</code></td><td>宏任务</td><td>❌ 嵌套 5 次以上被钳制到<b>最小 4ms</b>（HTML 规范）</td></tr>
+      <tr><td><code>Promise.resolve().then</code></td><td>微任务</td><td>❌ 微任务里浏览器<b>不能 paint / 处理输入</b></td></tr>
+      <tr><td><code>requestAnimationFrame</code></td><td>帧调度</td><td>❌ 只在下一帧前（~16ms），太慢；tab 后台不触发</td></tr>
+      <tr><td><code>requestIdleCallback</code></td><td>空闲时</td><td>❌ 只在浏览器空闲时，不稳定</td></tr>
+      <tr><td><b><code>MessageChannel</code></b></td><td><b>宏任务</b></td><td>✅ <b>无钳制、稳定、快速</b></td></tr>
+    </table>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>核心痛点：</b>setTimeout 一秒最多 250 片，严重限速。MessageChannel 没这个限制，可以背靠背跑几百片。</p>
+
+    <div class="card" style="border-left:3px solid var(--warn);margin:8px 0">
+      <h4 style="margin:0 0 6px">🧮 展开：为什么 setTimeout "一秒最多 250 片"</h4>
+
+      <p style="margin:6px 0"><b>数学：</b>HTML 规范规定嵌套调用的 <code>setTimeout(fn, 0)</code> <b>从第 5 次开始</b>会被强制成 <code>setTimeout(fn, 4)</code>（最小 4ms）。<b>1000ms ÷ 4ms = 250</b> 次触发/秒 —— 这就是"一秒 250 片"的由来。</p>
+
+      <p style="margin:12px 0 4px"><b>"嵌套"是啥：</b>不是函数嵌套调用，而是<b>回调里再调 setTimeout</b> 这种链式：</p>
+      <pre><span class="kw">function</span> <span class="fn">tick</span>(){
+  <span class="cm">// 干一片活</span>
+  <span class="fn">setTimeout</span>(tick, 0);   <span class="cm">// 排下一片</span>
+}
+<span class="fn">setTimeout</span>(tick, 0);</pre>
+      <p style="margin:6px 0;color:var(--dim);font-size:12.5px">React 的时间切片就是这个模式。<b>典型深度嵌套。</b></p>
+
+      <p style="margin:12px 0 4px"><b>具体钳制时序：</b></p>
+      <pre>第 1 次 setTimeout(fn, 0)  → 实际 0ms 后触发  ✅
+第 2 次(回调里调)          → 0ms             ✅
+第 3 次                    → 0ms             ✅
+第 4 次                    → 0ms             ✅
+第 5 次 ← 从这开始钳制!    → 强制 4ms        ⚠️
+第 6 次                    → 4ms             ⚠️
+...</pre>
+      <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>为啥有 4ms 钳制？</b>早期浏览器防止 <code>setTimeout(fn, 0)</code> 无限循环卡死浏览器给的下限，HTML5 就有，所有浏览器都遵守。</p>
+
+      <p style="margin:12px 0 4px"><b>对 React 5ms 切片的具体影响：</b></p>
+      <table class="simple">
+        <tr><th></th><th>setTimeout 版</th><th>MessageChannel 版</th></tr>
+        <tr><td>每周期</td><td>干 5ms + 强制等 4ms = <b>9ms</b></td><td>干 5ms + 空档 &lt;1ms = <b>&lt;6ms</b></td></tr>
+        <tr><td>一秒周期数</td><td>1000/9 ≈ <b>111</b></td><td>1000/6 ≈ <b>166+</b></td></tr>
+        <tr><td>一秒实际干活时长</td><td>≈ 555ms（其余等钳制）</td><td>≈ 830ms+（几乎没浪费）</td></tr>
+      </table>
+
+      <p style="margin:12px 0 4px"><b>实测代码（可以自己跑）：</b></p>
+      <pre><span class="cm">// setTimeout 版</span>
+<span class="kw">let</span> cs = 0, ts = Date.<span class="fn">now</span>();
+<span class="kw">function</span> <span class="fn">loopS</span>(){
+  cs++;
+  <span class="kw">if</span> (Date.<span class="fn">now</span>() - ts &lt; 1000) <span class="fn">setTimeout</span>(loopS, 0);
+  <span class="kw">else</span> console.<span class="fn">log</span>(<span class="st">'setTimeout 一秒:'</span>, cs);
+}
+<span class="fn">setTimeout</span>(loopS, 0);
+
+<span class="cm">// MessageChannel 版</span>
+<span class="kw">let</span> cm = 0, tm = Date.<span class="fn">now</span>();
+<span class="kw">const</span> ch = <span class="kw">new</span> <span class="fn">MessageChannel</span>();
+ch.port1.onmessage = () =&gt; {
+  cm++;
+  <span class="kw">if</span> (Date.<span class="fn">now</span>() - tm &lt; 1000) ch.port2.<span class="fn">postMessage</span>(<span class="kw">null</span>);
+  <span class="kw">else</span> console.<span class="fn">log</span>(<span class="st">'MessageChannel 一秒:'</span>, cm);
+};
+ch.port2.<span class="fn">postMessage</span>(<span class="kw">null</span>);</pre>
+      <p style="margin:6px 0"><b>典型结果：</b></p>
+      <ul class="clean" style="margin:6px 0">
+        <li>setTimeout ≈ <b>250 次</b>（硬顶）</li>
+        <li>MessageChannel ≈ <b>10000+ 次</b>（背靠背无钳制）</li>
+        <li><b>差距 40 倍</b></li>
+      </ul>
+
+      <h4 style="margin:12px 0 4px">🪜 爬楼梯类比</h4>
+      <ul class="clean" style="margin:6px 0">
+        <li><b>setTimeout 的楼梯：</b>每层门口有强制休息室，规定<b>至少歇 4 秒</b>才能上下一层</li>
+        <li><b>MessageChannel 的楼梯：</b>没这个规定，你想歇多久就多久（React 里就是"干完 5ms 立刻上下一层"）</li>
+      </ul>
+      <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>关键理解：</b>setTimeout 的 4ms 钳制不是"给浏览器 4ms 干别的事"，而是"强制你什么都别干" —— 这 4ms 里浏览器可能已经空闲了，但你没法立刻回来干活。<b>MessageChannel 消除了这个人为等待，让"干活密度"最大化。</b></p>
+    </div>
+
+    <h3 style="margin:12px 0 4px">MessageChannel 是什么</h3>
+    <p style="margin:6px 0">原本是 Web Workers 通信 API，但可以<b>在同一个页面里给自己发消息</b>：</p>
+    <pre><span class="kw">const</span> channel = <span class="kw">new</span> <span class="fn">MessageChannel</span>();
+channel.port1.onmessage = () =&gt; console.<span class="fn">log</span>(<span class="st">'收到!'</span>);
+channel.port2.<span class="fn">postMessage</span>(<span class="kw">null</span>);
+console.<span class="fn">log</span>(<span class="st">'当前同步代码'</span>);
+
+<span class="cm">// 输出:</span>
+<span class="cm">// 当前同步代码</span>
+<span class="cm">// 收到!</span></pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>关键：</b><code>postMessage()</code> <b>不会立即触发</b> <code>onmessage</code>，而是<b>排到宏任务队列</b>。当前 JS + 微任务 + 浏览器 render + 输入事件 → 然后才轮到它。<b>中间那段空档就是「让位给浏览器」的物理机制。</b></p>
+
+    <h3 style="margin:12px 0 4px">逐句读代码</h3>
+
+    <p style="margin:12px 0 4px"><b>① 建通道</b></p>
+    <pre><span class="kw">const</span> channel = <span class="kw">new</span> <span class="fn">MessageChannel</span>();
+<span class="kw">const</span> port = channel.port2;
+channel.port1.onmessage = performWorkUntilDeadline;</pre>
+    <p style="margin:6px 0">像建了一根管子：port2 塞字条，port1 读字条。<b>塞进去 → 排一个宏任务 → 稍后触发读端。</b></p>
+
+    <p style="margin:12px 0 4px"><b>② 排队入口</b></p>
+    <pre><span class="kw">function</span> <span class="fn">requestHostCallback</span>(cb){
+  scheduledHostCallback = cb;
+  port.<span class="fn">postMessage</span>(<span class="kw">null</span>);   <span class="cm">// ★发消息 = 排一个宏任务</span>
+}</pre>
+    <p style="margin:6px 0">把要跑的活存到模块变量，然后<b>塞一张空白字条</b> —— 排一个宏任务。<code>null</code> 是啥不重要，React <b>只利用"塞字条 → 排宏任务"这个副作用</b>。</p>
+
+    <p style="margin:12px 0 4px"><b>③ 干一片活</b></p>
+    <pre><span class="kw">const</span> performWorkUntilDeadline = () =&gt; {
+  startTime = <span class="fn">getCurrentTime</span>();                          <span class="cm">// (1)记起点</span>
+  <span class="kw">const</span> hasMore = <span class="fn">scheduledHostCallback</span>(<span class="kw">true</span>, startTime);  <span class="cm">// (2)干活</span>
+  <span class="kw">if</span>(hasMore) port.<span class="fn">postMessage</span>(<span class="kw">null</span>);                    <span class="cm">// (3)续片</span>
+};</pre>
+    <ol style="margin:4px 0;padding-left:22px">
+      <li><b>记录起点</b> <code>startTime</code> → 供 <code>shouldYield</code> 判断"过了几毫秒"</li>
+      <li><b>干活</b> = 调 <code>scheduledHostCallback</code>（就是 Scheduler 的工作循环，遍历 task 最小堆）</li>
+      <li><b>续片</b> = 如果活没干完，<code>postMessage(null)</code> 再排一个宏任务</li>
+    </ol>
+
+    <p style="margin:12px 0 4px"><b>④ 判断该停了</b></p>
+    <pre><span class="kw">const</span> frameInterval = <span class="st">5</span>;
+<span class="kw">function</span> <span class="fn">shouldYieldToHost</span>(){
+  <span class="kw">return</span> <span class="fn">getCurrentTime</span>() - startTime &gt;= frameInterval;
+}</pre>
+    <p style="margin:6px 0">工作循环每处理完<b>一个 task</b>就问一次："距离 startTime 是不是过了 5ms？"过了就退出这一片。</p>
+
+    <h3 style="margin:14px 0 4px">🎬 一轮完整时间线</h3>
+    <pre>T=0    调 requestHostCallback(cb)
+         cb 存入 scheduledHostCallback
+         postMessage(null) → 排一个宏任务
+         当前 JS 继续跑,直到本轮同步代码结束
+
+T=1    ┌──────────────────────────────────────┐
+       │ 微任务清空 → 浏览器 paint / 处理输入 │  ← 空档 1
+       └──────────────────────────────────────┘
+
+T=2    宏任务 tick → onmessage 触发
+       performWorkUntilDeadline:
+         startTime = T2
+         scheduledHostCallback 循环:
+           处理 task1 → shouldYield? (T2+0.5 vs T2+5) → 否
+           处理 task2 → shouldYield? (T2+1.2 vs T2+5) → 否
+           ...
+           某次问: (T2+5.1 vs T2+5) → 是! → 退出
+         hasMore = true → postMessage 排下一片
+
+T=3    ┌──────────────────────────────────────┐
+       │ 浏览器 paint / 处理输入              │  ← 空档 2
+       └──────────────────────────────────────┘
+
+T=4    下一个宏任务 tick → 同 T2 循环,再干 5ms
+
+...    循环直到 hasMore = false</pre>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>每两片之间的空档就是「让给浏览器」的时机</b> —— 这就是页面能保持流畅的物理原因。</p>
+
+    <h3 style="margin:12px 0 4px">前端类比：你可能写过</h3>
+    <pre><span class="kw">let</span> index = 0;
+<span class="kw">function</span> <span class="fn">processChunk</span>(){
+  <span class="kw">const</span> start = Date.<span class="fn">now</span>();
+  <span class="kw">while</span> (index &lt; items.length &amp;&amp; Date.<span class="fn">now</span>() - start &lt; 5){
+    <span class="fn">process</span>(items[index++]);
+  }
+  <span class="kw">if</span> (index &lt; items.length) <span class="fn">setTimeout</span>(processChunk, 0);
+  <span class="cm">//                       ↑ ← 唯一区别在这里</span>
+}</pre>
+    <p style="margin:6px 0"><b>Scheduler 就是这个模式，把 <code>setTimeout</code> 换成了 MessageChannel</b>（避开钳制）：</p>
+    <table class="simple">
+      <tr><th>你的代码</th><th>Scheduler</th></tr>
+      <tr><td><code>setTimeout(processChunk, 0)</code></td><td><code>port.postMessage(null)</code></td></tr>
+      <tr><td><code>processChunk</code> 里的 while 循环</td><td><code>scheduledHostCallback</code> 里的工作循环</td></tr>
+      <tr><td><code>Date.now() - start &lt; 5</code></td><td><code>!shouldYieldToHost()</code></td></tr>
+      <tr><td><code>index</code> 记录进度</td><td>Scheduler 最小堆 + <code>workInProgress</code></td></tr>
+    </table>
+
+    <h3 style="margin:12px 0 4px">几个易混点</h3>
+    <table class="simple">
+      <tr><th>问</th><th>答</th></tr>
+      <tr><td><code>postMessage(null)</code> 里的 <code>null</code> 有意义吗？</td><td><b>没意义</b>。React 只利用"post 一次就排一个宏任务"这个副作用</td></tr>
+      <tr><td><code>onmessage</code> 触发时收到什么？</td><td><b>也没意义</b>。onmessage 只是"到时机了叫我"的通知</td></tr>
+      <tr><td>5ms 从哪来的？</td><td>经验值。太短（1ms）切片开销高；太长（16ms）输入延迟明显。5ms 是甜蜜点</td></tr>
+      <tr><td>不支持 MessageChannel 咋办？</td><td>fallback 到 <code>setTimeout(fn, 0)</code> —— 能用则用</td></tr>
+    </table>
+
+    <div class="callout good" style="margin-top:10px"><b>一句话总结：</b>MessageChannel = "无 4ms 钳制的 <code>setTimeout(fn, 0)</code>"。<code>postMessage</code> 排宏任务，浏览器在两个宏任务之间能 paint 和处理输入，<code>shouldYieldToHost</code> 用 startTime 判断"这片够 5ms 了吗"。<b>循环 = 干一片 → 让浏览器一下 → 干一片 → ...</b>直到活干完。</div>
+  </div>
+
   <h2><span class="dot" style="background:var(--accent)"></span>为什么比 setTimeout / rIC 精准</h2>
   <table class="simple">
     <tr><th>方案</th><th>问题</th></tr>
@@ -287,6 +993,106 @@ channel.port1.onmessage = performWorkUntilDeadline;
     <tr><td>requestIdleCallback</td><td>触发不稳定、频率低、兼容差</td></tr>
     <tr><td><b>MessageChannel</b></td><td><b>无 4ms 钳制的宏任务</b>,绘制/事件后尽快触发 → 卡在帧之间</td></tr>
   </table>
+
+  <div class="card">
+    <h3 style="margin-top:0">🍽️ 展开：为什么 Promise 微任务会阻塞渲染</h3>
+    <p style="margin:6px 0">"绘制前就清空，阻塞渲染，拿不到帧间空档"这句藏了浏览器事件循环最关键的规则。展开讲。</p>
+
+    <h3 style="margin:12px 0 4px">浏览器一"帧"里发生什么</h3>
+    <pre>1. 取一个宏任务(setTimeout / MessageChannel / click 等)执行
+2. 清空所有微任务(Promise.then / queueMicrotask 等)
+3. 检查是否需要 rAF 回调
+4. 需要则 layout / paint (★渲染画面)
+5. rIC 回调(空闲时)
+6. 回到 1</pre>
+    <p style="margin:6px 0"><b>两个关键规则：</b></p>
+    <ul class="clean" style="margin:6px 0">
+      <li><b>每处理完一个宏任务，浏览器先把微任务清空，才 paint</b></li>
+      <li><b>微任务里产生的新微任务会一直执行，直到队列真的空</b></li>
+    </ul>
+
+    <h3 style="margin:12px 0 4px">用 Promise 做时间切片会怎样</h3>
+    <pre><span class="kw">function</span> <span class="fn">tick</span>(){
+  <span class="kw">const</span> start = Date.<span class="fn">now</span>();
+  <span class="kw">while</span> (Date.<span class="fn">now</span>() - start &lt; 5){
+    <span class="fn">doWork</span>();
+  }
+  <span class="kw">if</span> (hasMore) Promise.<span class="fn">resolve</span>().<span class="fn">then</span>(tick);   <span class="cm">// 排"下一片"</span>
+}
+Promise.<span class="fn">resolve</span>().<span class="fn">then</span>(tick);</pre>
+    <p style="margin:6px 0"><b>执行流程：</b></p>
+    <pre>① 当前宏任务结束
+② 浏览器进入"清空微任务"阶段
+③ 执行 tick → 干 5ms 活 → Promise.resolve().then(tick) 又排一个微任务
+④ 微任务队列还没空,继续执行下一个 tick
+⑤ 干 5ms 活 → 又排一个
+⑥ 继续 ...</pre>
+    <p style="margin:6px 0;color:var(--warn)"><b>问题：</b>微任务队列<b>永远清不空</b>。每次执行都往队列里塞新的 → <b>浏览器永远走不到 paint 阶段</b> → 页面<b>完全冻结</b>。JS 在跑，但用户看不到任何更新。</p>
+
+    <h3 style="margin:12px 0 4px">"绘制前清空 / 阻塞渲染"具体是啥</h3>
+    <ul class="clean" style="margin:6px 0">
+      <li><b>绘制前清空 =</b> paint 之前必须先清空微任务队列（浏览器规则）</li>
+      <li><b>阻塞渲染 =</b> 微任务不停产生新微任务 → 队列不空 → paint 永远轮不到</li>
+      <li><b>拿不到帧间空档 =</b> 微任务之间不会插入 layout/paint/输入处理</li>
+    </ul>
+
+    <h3 style="margin:12px 0 4px">对比：MessageChannel 宏任务版</h3>
+    <pre>① 取宏任务(tick 第1片) → 执行 → postMessage 排下一片
+② 当前宏任务结束
+③ 微任务清空(空)
+④ ★ 浏览器 paint ← 画面能更新
+⑤ 处理输入事件
+⑥ 取下一个宏任务(tick 第2片) → 执行 → postMessage 排下一片
+⑦ 又能 paint
+...</pre>
+    <p style="margin:6px 0"><b>每两片之间都有 paint 机会</b>。用户看到的是<b>页面持续更新，交互跟手</b>。</p>
+
+    <h3 style="margin:12px 0 4px">🎨 图对比</h3>
+    <pre><b>微任务(Promise)版:</b>
+
+时间轴 →
+┌──宏任务──┬────────微任务疯狂清空────────┬─paint?
+│ initial │ tick1 → tick2 → tick3 → ... → tickN │  ❌
+└─────────┴──────────────────────────────────────┘
+
+队列永远填不完,paint 阶段轮不到 → 页面冻结
+
+
+<b>宏任务(MessageChannel)版:</b>
+
+时间轴 →
+┌tick1┬清空┬paint┬tick2┬清空┬paint┬tick3┬清空┬paint┐
+│ 5ms │空  │ ✅  │ 5ms │空  │ ✅  │ 5ms │空  │ ✅  │
+└─────┴────┴─────┴─────┴────┴─────┴─────┴────┴─────┘
+
+每片之间浏览器都能 paint → 界面流畅</pre>
+
+    <h3 style="margin:12px 0 4px">🍳 厨房类比</h3>
+    <ul class="clean" style="margin:6px 0">
+      <li><b>微任务模式：</b>「我先把这盘菜炒完再看客人」—— 一旦开始就必须做完<b>所有</b>微任务，客人（浏览器 paint）得等</li>
+      <li><b>宏任务模式：</b>「我做完这盘就出门透透气」—— 每个宏任务结束都是「透气」时机，客人可以插进来</li>
+    </ul>
+    <p style="margin:6px 0;color:var(--dim);font-size:12.5px"><b>微任务是「贪婪」的</b>（不给别人机会），<b>宏任务是「礼让」的</b>（每次给别人机会）。时间切片要求"每片之后都让出" —— 微任务的贪婪特性正好是它的死穴。</p>
+
+    <h3 style="margin:12px 0 4px">可实测验证</h3>
+    <pre><span class="cm">// ⚠️ 微任务版会让页面立刻冻结,别真跑或先保存工作</span>
+<span class="kw">function</span> <span class="fn">tickMicro</span>(){
+  <span class="kw">const</span> start = Date.<span class="fn">now</span>();
+  <span class="kw">while</span> (Date.<span class="fn">now</span>() - start &lt; 5){}
+  Promise.<span class="fn">resolve</span>().<span class="fn">then</span>(tickMicro);
+}
+Promise.<span class="fn">resolve</span>().<span class="fn">then</span>(tickMicro);   <span class="cm">// 页面立刻卡死,直到 tab 被浏览器杀掉</span>
+
+<span class="cm">// 宏任务版:页面流畅</span>
+<span class="kw">function</span> <span class="fn">tickMacro</span>(){
+  <span class="kw">const</span> start = Date.<span class="fn">now</span>();
+  <span class="kw">while</span> (Date.<span class="fn">now</span>() - start &lt; 5){}
+  <span class="fn">setTimeout</span>(tickMacro, 0);
+}
+<span class="fn">setTimeout</span>(tickMacro, 0);   <span class="cm">// UI 保持响应</span></pre>
+
+    <div class="callout good" style="margin-top:10px"><b>一句话总结：</b>"绘制前清空、阻塞渲染、拿不到帧间空档" = <b>Promise 微任务永远排在 paint 之前，而且如果自我 chain 会填不满队列，导致 paint 永远轮不到</b>。所以 React Scheduler <b>不能用 Promise，只能用宏任务</b> —— 不是选择题，是必答题。</div>
+  </div>
 
   <h2><span class="dot" style="background:var(--fiber)"></span>Scheduler 内部怎样保存任务</h2>
   <p>到这里再看最小堆就容易了：堆里的一个 React 任务，通常是<b>某个 root 的工作回调</b>，不是一个 Fiber。<code>taskQueue</code> 保存已经可以运行的任务，按 <code>expirationTime</code> 排序；<code>timerQueue</code> 保存尚未到开始时间的延迟任务，按 <code>startTime</code> 排序。<code>advanceTimers</code> 会把已经到点的任务移入 <code>taskQueue</code>。</p>
